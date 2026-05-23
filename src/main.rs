@@ -144,8 +144,9 @@ fn main() -> ExitCode {
             let target = if t < 1.0 { t } else { 1.0 };
             state.step(&character, target, dt);
             state.step_gaze(t, dt);
+            state.step_blink(t, dt);
             if let Some(cfg) = character.render_config.embers {
-                state.step_embers(&cfg, dt, 5.0);
+                state.step_embers(&cfg, dt, 6.5);
             }
             let pixmap = renderer.render(&character, &state, t);
             let path = output.join(format!("{f:04}.png"));

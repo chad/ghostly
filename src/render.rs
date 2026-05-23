@@ -95,6 +95,17 @@ pub struct FaceState {
     ember_spawn_budget: f32,
     /// PRNG for ember spawning.
     ember_rng: u64,
+    /// `0..=1` blink amount — 0 = eyes open, 1 = fully closed. Eased
+    /// up/down on a per-blink cycle. Renderer reads this and dims
+    /// eye-particle alpha by it.
+    blink: f32,
+    /// Blink direction: `+1.0` while closing (blink rising), `-1.0`
+    /// while opening (blink falling), `0.0` between blinks.
+    blink_dir: f32,
+    /// When the next blink starts (in `time` seconds).
+    next_blink_at: f32,
+    /// PRNG for blink scheduling.
+    blink_rng: u64,
 }
 
 impl FaceState {
@@ -128,6 +139,40 @@ impl FaceState {
             embers: Vec::new(),
             ember_spawn_budget: 0.0,
             ember_rng: seed.wrapping_add(0xDEAD_BEEF_CAFE_F00D),
+            blink: 0.0,
+            blink_dir: 0.0,
+            // First blink fires in 2-5s.
+            next_blink_at: 3.0,
+            blink_rng: seed.wrapping_add(0x1234_5678_9ABC_DEF0),
+        }
+    }
+
+    /// Step the blink. Eyes briefly close at irregular intervals
+    /// (every 3-7s) — gives an instant "this is alive" cue. The
+    /// renderer reads `self.blink` (0=open, 1=closed) and dims
+    /// eye-particle alpha by it. A blink lasts ~150ms: ramp up to
+    /// fully closed in ~80ms, ramp back open in ~80ms.
+    pub fn step_blink(&mut self, time: f32, dt: f32) {
+        // Idle → schedule the next blink.
+        if self.blink_dir == 0.0 && time >= self.next_blink_at {
+            self.blink_dir = 1.0;
+        }
+        if self.blink_dir > 0.0 {
+            // Closing.
+            self.blink += dt * 13.0;
+            if self.blink >= 1.0 {
+                self.blink = 1.0;
+                self.blink_dir = -1.0;
+            }
+        } else if self.blink_dir < 0.0 {
+            // Opening.
+            self.blink -= dt * 13.0;
+            if self.blink <= 0.0 {
+                self.blink = 0.0;
+                self.blink_dir = 0.0;
+                let r = next_rand(&mut self.blink_rng);
+                self.next_blink_at = time + 3.0 + r * 4.0;
+            }
         }
     }
 
@@ -469,11 +514,17 @@ impl Renderer {
             // a strong contrast: white-hot pinpoint over a deeper-
             // red silhouette, instead of two bright spots in a
             // uniform bright field.
+            //
+            // Eye particles also gate by the blink amount — when the
+            // face blinks, their alpha drops to near zero for the
+            // ~150ms of the blink. Instant "this is alive" cue.
             let non_eye_dim = if p.is_eye { 1.0 } else { 0.68 };
+            let blink_gate = if p.is_eye { 1.0 - state.blink } else { 1.0 };
             let a_f = p.color[3]
                 * (0.5 + state.pt[i] * 0.5)
                 * (1.0 + level * 0.6)
-                * non_eye_dim;
+                * non_eye_dim
+                * blink_gate;
             if a_f < 0.01 {
                 continue;
             }
@@ -490,6 +541,38 @@ impl Renderer {
                     let off = ((py as usize) * pw + (px as usize)) * 4;
                     // Premultiplied additive-screen blend onto BGRA.
                     blend_add_premul(&mut data[off..off + 4], r as u8, g as u8, b as u8, a as u8);
+                }
+            }
+
+            // ── Bloom halo ──
+            // A second, larger, dimmer splat around each particle.
+            // Approximates the Gaussian glow that makes the avatar
+            // reference *pop* — particles read as glowing fire
+            // instead of discrete dots — without paying for a full
+            // blur post-pass. Skipped for already-dim particles
+            // (a<40) so the halo cost only fires where it matters.
+            if a >= 40 {
+                let halo_size = (size * 2.2).max(4.0);
+                let halo_half = halo_size * 0.5;
+                let halo_a = (a as f32 * 0.22) as u8;
+                if halo_a >= 4 {
+                    let hx0 = ((sx - halo_half).floor() as i32).max(0);
+                    let hy0 = ((sy - halo_half).floor() as i32).max(0);
+                    let hx1 = ((sx + halo_half).ceil() as i32).min(pw as i32 - 1);
+                    let hy1 = ((sy + halo_half).ceil() as i32).min(ph as i32 - 1);
+                    for py in hy0..=hy1 {
+                        let row_off = py as usize * pw;
+                        for px in hx0..=hx1 {
+                            let off = (row_off + px as usize) * 4;
+                            blend_add_premul(
+                                &mut data[off..off + 4],
+                                r as u8,
+                                g as u8,
+                                b as u8,
+                                halo_a,
+                            );
+                        }
+                    }
                 }
             }
         }

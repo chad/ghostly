@@ -172,9 +172,9 @@ impl Default for ContourBaseline {
 
 /// Fresnel / specular / mesh-overlay knobs that mostly affect the
 /// post-pass on a real GPU pipeline. We carry the values verbatim so a
-/// future wgpu backend can read them, and the software backend uses a
-/// subset (`fresnel_intensity` adds rim glow; `voronoi_mesh` if `Some`
-/// draws a wireframe overlay).
+/// future wgpu backend can read them; the software backend uses the
+/// subset it can express cheaply (rim glow, voronoi mesh, nebula
+/// cloud, accent-particle ring).
 #[derive(Clone, Debug)]
 pub struct RenderConfig {
     pub fresnel_power: f32,
@@ -182,6 +182,16 @@ pub struct RenderConfig {
     pub specular_power: f32,
     pub specular_intensity: f32,
     pub voronoi_mesh: Option<VoronoiMesh>,
+    /// Dim radial gradient painted *behind* the face — used by Utopia
+    /// for its golden nebula. `None` skips the gradient.
+    pub nebula_cloud: Option<NebulaCloud>,
+    /// Optional floating ring of accent particles orbiting the face —
+    /// lavender for Utopia, but works for any character that wants a
+    /// non-face particle layer.
+    pub accent_particles: Option<AccentParticles>,
+    /// Extra glow weight applied to contour strokes — Utopia's wire
+    /// bands lean hot at the centre and dim at the edges.
+    pub band_glow: bool,
 }
 
 impl Default for RenderConfig {
@@ -192,8 +202,34 @@ impl Default for RenderConfig {
             specular_power: 40.0,
             specular_intensity: 1.0,
             voronoi_mesh: None,
+            nebula_cloud: None,
+            accent_particles: None,
+            band_glow: false,
         }
     }
+}
+
+/// A dim coloured radial gradient painted behind the face. Mirrors
+/// `nebulaCloud` in the JS spec — for Utopia it bathes the orb in a
+/// warm golden glow.
+#[derive(Clone, Copy, Debug)]
+pub struct NebulaCloud {
+    pub color: [u8; 3],
+    /// `0..1` strength at the centre. Faints to zero at the corners.
+    pub intensity: f32,
+}
+
+/// Ring of independently-orbiting accent particles. Mirrors
+/// `accentParticles` in the JS spec. Used for Utopia's lavender edge
+/// motes.
+#[derive(Clone, Copy, Debug)]
+pub struct AccentParticles {
+    pub count: u32,
+    pub color: [u8; 3],
+    pub alpha: f32,
+    /// Mean orbit radius in scene units (multiplied by `min(w,h)*0.38`
+    /// at render time — same scale the particle field uses).
+    pub radius: f32,
 }
 
 /// Faint cracked-glass wireframe overlay (`voronoiMesh` in the JS

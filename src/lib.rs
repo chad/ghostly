@@ -33,10 +33,12 @@ pub mod character;
 pub mod characters;
 pub mod face;
 pub mod render;
+pub mod sentiment;
 
 pub use character::{
-    Character, Contour, ContourBaseline, Displace, Geometry, Palette, RenderConfig, Transition,
-    VoronoiMesh,
+    AccentParticles, Character, Contour, ContourBaseline, Displace, Geometry, NebulaCloud,
+    Palette, RenderConfig, Transition, VoronoiMesh,
 };
 pub use face::{generate_face, Particle};
 pub use render::{FaceState, RenderSettings, Renderer};
+pub use sentiment::{apply_emotion, Emotion};

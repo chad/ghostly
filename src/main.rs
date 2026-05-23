@@ -9,9 +9,9 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use ghostly::{characters, FaceState, RenderSettings, Renderer};
+use ghostly::{characters, apply_emotion, Emotion, FaceState, RenderSettings, Renderer};
 
-const USAGE: &str = "Usage: ghostly <character> [--output PATH] [--frames N] [--particles N] [--size WxH]\n       ghostly --list\n\nCharacters: oblivion (full), narrator (placeholder), utopia (placeholder), eliza (placeholder)";
+const USAGE: &str = "Usage: ghostly <character> [--output PATH] [--frames N] [--particles N] [--size WxH] [--emotion NAME[:0.0-1.0]]\n       ghostly --list\n\nCharacters: oblivion, narrator, utopia, eliza\nEmotions:   joy, triumph, curiosity, passion, calm, awe, warmth, concern";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -33,6 +33,7 @@ fn main() -> ExitCode {
     let mut particles: usize = 12_000;
     let mut width: u32 = 640;
     let mut height: u32 = 360;
+    let mut emotion: Option<(Emotion, f32)> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -72,6 +73,22 @@ fn main() -> ExitCode {
                 }
                 i += 2;
             }
+            "--emotion" => {
+                // `joy` or `passion:0.75` — defaults to full intensity.
+                if let Some(s) = args.get(i + 1) {
+                    let (name, intensity) = match s.split_once(':') {
+                        Some((n, t)) => (n, t.parse().unwrap_or(1.0_f32)),
+                        None => (s.as_str(), 1.0_f32),
+                    };
+                    if let Some(e) = Emotion::parse(name) {
+                        emotion = Some((e, intensity.clamp(0.0, 1.0)));
+                    } else {
+                        eprintln!("unknown emotion: {name:?}");
+                        return ExitCode::from(2);
+                    }
+                }
+                i += 2;
+            }
             _ => {
                 eprintln!("unknown arg: {arg}\n{USAGE}");
                 return ExitCode::from(2);
@@ -86,6 +103,10 @@ fn main() -> ExitCode {
     let Some(character) = characters::by_name(&name) else {
         eprintln!("unknown character: {name:?}\n{USAGE}");
         return ExitCode::from(2);
+    };
+    let character = match emotion {
+        Some((e, i)) => apply_emotion(&character, e, i),
+        None => character,
     };
 
     let state = FaceState::new(&character, particles, 2.8, 42);

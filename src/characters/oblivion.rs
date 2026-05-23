@@ -44,6 +44,11 @@ pub fn build() -> Character {
                 alpha: 0.14,
                 line_width: 0.5,
             }),
+            // No glow halo / nebula / accent ring — Oblivion's
+            // menace comes from sharp lines, not luminance.
+            nebula_cloud: None,
+            accent_particles: None,
+            band_glow: false,
         },
     }
 }

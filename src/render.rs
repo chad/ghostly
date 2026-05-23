@@ -12,7 +12,7 @@
 
 use tiny_skia::{Color, Paint, PathBuilder, Pixmap, Stroke, Transform};
 
-use crate::character::{Character, ContourBaseline};
+use crate::character::{AccentParticles, Character, ContourBaseline, NebulaCloud};
 use crate::face::{generate_face, Particle};
 
 /// Per-tile mutable state. Holds the particle field plus the cached
@@ -154,6 +154,13 @@ impl Renderer {
         let cy = h * 0.5;
         let sc = w.min(h) * 0.38;
 
+        // Nebula cloud goes underneath everything — a dim radial glow
+        // behind the face. Skipped when the character doesn't ask for
+        // one.
+        if let Some(neb) = character.render_config.nebula_cloud {
+            self.paint_nebula(neb, cx, cy);
+        }
+
         let breath =
             (time * character.contour_baseline.breath_rate * std::f32::consts::TAU).sin() * 0.5
                 + 0.5;
@@ -226,12 +233,108 @@ impl Renderer {
         // Strokes layered on top — outer glow under, sharper inner line over.
         self.stroke_contours(character, breath, cx, cy, sc);
 
-        // ── Voronoi-mesh overlay (Oblivion uses a red one) ───────
+        // ── Accent particle ring (Utopia's lavender motes) ───────
+        if let Some(ring) = character.render_config.accent_particles {
+            self.draw_accent_particles(ring, time, cx, cy, sc);
+        }
+
+        // ── Voronoi-mesh overlay (Oblivion red / Utopia gold) ────
         if let Some(mesh) = character.render_config.voronoi_mesh {
             self.draw_voronoi_overlay(mesh, time);
         }
 
         &self.pixmap
+    }
+
+    /// Paint a soft radial gradient behind the face. Manual loop over
+    /// every pixel — cheap at 640×360 and lets us match the avatar
+    /// exactly (premultiplied additive, soft falloff).
+    fn paint_nebula(&mut self, neb: NebulaCloud, cx: f32, cy: f32) {
+        let pw = self.settings.width as usize;
+        let ph = self.settings.height as usize;
+        let max_r = (cx.max(self.settings.width as f32 - cx)
+            .powi(2)
+            + cy.max(self.settings.height as f32 - cy).powi(2))
+        .sqrt();
+        let data = self.pixmap.data_mut();
+        let nr = neb.color[0];
+        let ng = neb.color[1];
+        let nb = neb.color[2];
+        for py in 0..ph {
+            let dy = py as f32 - cy;
+            for px in 0..pw {
+                let dx = px as f32 - cx;
+                let r = (dx * dx + dy * dy).sqrt() / max_r;
+                // Soft falloff — squared so the centre is bright and
+                // the corners fade gracefully.
+                let strength = (1.0 - r).max(0.0).powi(2) * neb.intensity;
+                if strength < 0.005 {
+                    continue;
+                }
+                let off = (py * pw + px) * 4;
+                let a = (strength * 255.0).min(255.0) as u32;
+                let cr = (nr as u32 * a) / 255;
+                let cg = (ng as u32 * a) / 255;
+                let cb = (nb as u32 * a) / 255;
+                data[off] = (data[off] as u32 + cr).min(255) as u8;
+                data[off + 1] = (data[off + 1] as u32 + cg).min(255) as u8;
+                data[off + 2] = (data[off + 2] as u32 + cb).min(255) as u8;
+                // Alpha already 255 from fade_to_black.
+            }
+        }
+    }
+
+    /// Draw an orbiting ring of accent particles. Each particle has a
+    /// distinct radius + phase derived from its index, so the ring
+    /// reads as a *cloud* rather than a single tracked orbit.
+    fn draw_accent_particles(
+        &mut self,
+        ring: AccentParticles,
+        time: f32,
+        cx: f32,
+        cy: f32,
+        sc: f32,
+    ) {
+        let data = self.pixmap.data_mut();
+        let pw = self.settings.width as usize;
+        let ph = self.settings.height as usize;
+        let r_base = ring.radius * sc * 0.4;
+        let a = (ring.alpha * 255.0).min(255.0) as u32;
+        let r = ring.color[0];
+        let g = ring.color[1];
+        let b = ring.color[2];
+        for i in 0..ring.count {
+            // Deterministic per-particle phase + radius variance.
+            let s = i as f32;
+            let phase = (s * 0.6180339887).fract() * std::f32::consts::TAU;
+            let speed = 0.18 + (s * 0.123).sin().abs() * 0.18;
+            let rad = r_base * (0.85 + (s * 0.31).sin().abs() * 0.45);
+            let ang = phase + time * speed;
+            let px = cx + ang.cos() * rad;
+            let py = cy + ang.sin() * rad * 0.85; // squashed vertically
+            let pxi = px.floor() as i32;
+            let pyi = py.floor() as i32;
+            if pxi < 0 || pyi < 0 || (pxi as usize) >= pw || (pyi as usize) >= ph {
+                continue;
+            }
+            // 2×2 splat — gentle and cheap.
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    let xi = pxi + dx;
+                    let yi = pyi + dy;
+                    if xi < 0 || yi < 0 || (xi as usize) >= pw || (yi as usize) >= ph {
+                        continue;
+                    }
+                    let off = ((yi as usize) * pw + xi as usize) * 4;
+                    let cr = (r as u32 * a) / 255;
+                    let cg = (g as u32 * a) / 255;
+                    let cb = (b as u32 * a) / 255;
+                    data[off] = (data[off] as u32 + cr).min(255) as u8;
+                    data[off + 1] = (data[off + 1] as u32 + cg).min(255) as u8;
+                    data[off + 2] = (data[off + 2] as u32 + cb).min(255) as u8;
+                }
+            }
+        }
     }
 
     /// Fade RGB toward black by `alpha` (0..1) while keeping the pixmap
@@ -260,6 +363,8 @@ impl Renderer {
         let outer_a = (cb.outer_alpha * 255.0) as u8;
         let inner_a = (cb.inner_alpha * 255.0) as u8;
 
+        let band_glow = character.render_config.band_glow;
+
         for path in &character.contour_paths {
             if path.len() < 2 {
                 continue;
@@ -277,19 +382,33 @@ impl Renderer {
             }
             let Some(built) = pb.finish() else { continue };
 
-            // Outer glow — softer + wider.
             let mut paint = Paint::default();
+            paint.anti_alias = true;
+            let mut stroke = Stroke::default();
+            stroke.line_cap = tiny_skia::LineCap::Round;
+            stroke.line_join = tiny_skia::LineJoin::Round;
+
+            // Band glow — wider, very faint pass underneath. Gives
+            // Utopia's wire bands their luminous halo.
+            if band_glow {
+                paint.set_color(Color::from_rgba8(
+                    character.contour_color[0],
+                    character.contour_color[1],
+                    character.contour_color[2],
+                    outer_a / 5,
+                ));
+                stroke.width = outer_w * 2.4;
+                self.pixmap.stroke_path(&built, &paint, &stroke, Transform::identity(), None);
+            }
+
+            // Outer glow — softer + wider.
             paint.set_color(Color::from_rgba8(
                 character.contour_color[0],
                 character.contour_color[1],
                 character.contour_color[2],
                 outer_a / 2,
             ));
-            paint.anti_alias = true;
-            let mut stroke = Stroke::default();
             stroke.width = outer_w;
-            stroke.line_cap = tiny_skia::LineCap::Round;
-            stroke.line_join = tiny_skia::LineJoin::Round;
             self.pixmap.stroke_path(&built, &paint, &stroke, Transform::identity(), None);
 
             // Inner crisp line.
@@ -304,10 +423,19 @@ impl Renderer {
         }
     }
 
-    /// Draw a faint cracked-glass wireframe overlay — fixed lattice
-    /// jittered by `time`, just enough to read as "broken hologram".
-    /// The full Voronoi cell-relaxation algorithm would be lovely; for
-    /// now we approximate with a hexagonal grid which reads the same.
+    /// Cracked-glass wireframe overlay. A deterministic Poisson-disk
+    /// scatter of seed points (gives an organic, non-grid feel), then
+    /// edges between any two seeds within a threshold distance — the
+    /// proximity graph reads visually identically to a true Voronoi
+    /// triangulation at this density. Each seed wobbles around its
+    /// rest position over time so the mesh subtly *breathes* like a
+    /// holographic lattice rather than sitting flat.
+    ///
+    /// Skipping the true Lloyd-relaxed Voronoi cells because at ~80
+    /// seeds the proximity graph is indistinguishable to the eye but
+    /// is O(N²) instead of needing a full geometric kernel. If we
+    /// ever raise the density past ~200 seeds we'll need the real
+    /// thing.
     fn draw_voronoi_overlay(&mut self, mesh: crate::character::VoronoiMesh, time: f32) {
         let w = self.settings.width as f32;
         let h = self.settings.height as f32;
@@ -321,24 +449,72 @@ impl Renderer {
         paint.anti_alias = true;
         let mut stroke = Stroke::default();
         stroke.width = mesh.line_width;
-        const STEP: f32 = 38.0;
-        let drift = (time * 0.3).sin() * 6.0;
-        for row in 0..=((h / STEP) as i32 + 1) {
-            let y = row as f32 * STEP * 0.866 + drift;
-            let x_off = if row % 2 == 0 { 0.0 } else { STEP * 0.5 };
-            for col in -1..=((w / STEP) as i32 + 1) {
-                let x = col as f32 * STEP + x_off + (time * 0.5).cos() * 4.0;
-                // Three of the six hexagon edges per cell — enough to
-                // imply the lattice without doubling every edge.
-                let mut pb = PathBuilder::new();
-                pb.move_to(x, y);
-                pb.line_to(x + STEP * 0.5, y + STEP * 0.288);
-                pb.line_to(x + STEP, y);
-                pb.line_to(x + STEP, y - STEP * 0.577);
-                if let Some(path) = pb.finish() {
-                    self.pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+
+        // ── Deterministic Poisson-disk-ish seed scatter ──
+        // We use the golden-ratio low-discrepancy sequence + a quick
+        // rejection step to keep seeds at least `MIN_SEP` apart. Same
+        // input → same lattice, so the mesh is stable across frames.
+        const TARGET_SEEDS: usize = 90;
+        const PHI: f32 = 1.618_034;
+        const MIN_SEP: f32 = 44.0;
+        let mut seeds: Vec<[f32; 2]> = Vec::with_capacity(TARGET_SEEDS);
+        let mut tried = 0;
+        // The bg lattice runs slightly larger than the canvas so the
+        // mesh fades off the edges rather than ending abruptly.
+        let pad = MIN_SEP;
+        while seeds.len() < TARGET_SEEDS && tried < TARGET_SEEDS * 8 {
+            let i = tried as f32;
+            let u = (i * PHI).fract();
+            let v = ((i * PHI).fract() * PHI).fract();
+            let x = -pad + u * (w + pad * 2.0);
+            let y = -pad + v * (h + pad * 2.0);
+            let ok = seeds.iter().all(|&[sx, sy]| {
+                let dx = sx - x;
+                let dy = sy - y;
+                dx * dx + dy * dy >= MIN_SEP * MIN_SEP
+            });
+            if ok {
+                seeds.push([x, y]);
+            }
+            tried += 1;
+        }
+
+        // ── Time-modulated wobble ──
+        // Each seed drifts on a per-seed Lissajous so the lattice
+        // shivers without losing structure.
+        let live: Vec<[f32; 2]> = seeds
+            .iter()
+            .enumerate()
+            .map(|(i, [x, y])| {
+                let phase = i as f32 * 0.9;
+                let amp = MIN_SEP * 0.12;
+                let dx = (time * 0.4 + phase).sin() * amp;
+                let dy = (time * 0.55 + phase * 1.3).cos() * amp * 0.7;
+                [x + dx, y + dy]
+            })
+            .collect();
+
+        // ── Proximity-graph edges ──
+        // For each pair within `EDGE_MAX`, stroke a line. The cutoff
+        // is chosen so each seed connects to ~5-6 neighbours on
+        // average — same connectivity as a typical Voronoi cell.
+        const EDGE_MAX: f32 = 78.0;
+        let edge_max_sq = EDGE_MAX * EDGE_MAX;
+        let mut pb = PathBuilder::new();
+        for i in 0..live.len() {
+            let [x1, y1] = live[i];
+            for &[x2, y2] in &live[i + 1..] {
+                let dx = x2 - x1;
+                let dy = y2 - y1;
+                let d2 = dx * dx + dy * dy;
+                if d2 < edge_max_sq {
+                    pb.move_to(x1, y1);
+                    pb.line_to(x2, y2);
                 }
             }
+        }
+        if let Some(path) = pb.finish() {
+            self.pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
         }
     }
 }

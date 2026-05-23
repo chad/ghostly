@@ -57,6 +57,14 @@ pub fn build() -> Character {
                 alpha: 0.35,
                 radius: 2.8,
             }),
+            // Soft vignette — corners darken just enough to push the
+            // orb forward. Avatar "joy" / "warmth" range.
+            vignette: 0.45,
+            // Audio shifts toward warm gold — same family as her base
+            // palette, just hotter. The wire bands glow brighter when
+            // she speaks.
+            audio_glow: [1.0, 0.85, 0.30],
+            audio_glow_strength: 0.6,
         },
     }
 }

@@ -247,15 +247,31 @@ impl Renderer {
             let x1 = (sx + half).ceil() as i32;
             let y1 = (sy + half).ceil() as i32;
 
-            let r = (p.color[0] * 255.0) as u32;
-            let g = (p.color[1] * 255.0) as u32;
-            let b = (p.color[2] * 255.0) as u32;
-            // Alpha climbs with materialization + per-particle base.
-            let a_f = p.color[3] * (0.5 + state.pt[i] * 0.5);
+            // Audio-reactive colour shift — each particle has a
+            // pseudo-frequency response derived from its index so the
+            // shift is uneven across the face (the "smoothFreq" trick
+            // from face-of-god-face.js without needing an FFT). Hot
+            // audio pulls the particle toward the character's
+            // `audio_glow` colour proportional to its phase response.
+            let p_phase = (idx * 0.07 + time * 3.7).sin().abs(); // 0..1
+            let glow_t = level * character.render_config.audio_glow_strength * (0.4 + p_phase);
+            let g_r = character.render_config.audio_glow[0];
+            let g_g = character.render_config.audio_glow[1];
+            let g_b = character.render_config.audio_glow[2];
+            let cr = p.color[0] * (1.0 - glow_t) + g_r * glow_t;
+            let cg = p.color[1] * (1.0 - glow_t) + g_g * glow_t;
+            let cb = p.color[2] * (1.0 - glow_t) + g_b * glow_t;
+            let r = (cr.clamp(0.0, 1.0) * 255.0) as u32;
+            let g = (cg.clamp(0.0, 1.0) * 255.0) as u32;
+            let b = (cb.clamp(0.0, 1.0) * 255.0) as u32;
+            // Alpha climbs with materialization + per-particle base +
+            // an audio boost so the field reads brighter overall when
+            // she speaks.
+            let a_f = p.color[3] * (0.5 + state.pt[i] * 0.5) * (1.0 + level * 0.6);
             if a_f < 0.01 {
                 continue;
             }
-            let a = (a_f * 255.0).min(255.0) as u32;
+            let a = (a_f.min(1.0) * 255.0).min(255.0) as u32;
 
             for py in y0..=y1 {
                 if py < 0 || py >= ph as i32 {
@@ -273,8 +289,9 @@ impl Renderer {
         }
 
         // ── Contour pass ──────────────────────────────────────────
-        // Strokes layered on top — outer glow under, sharper inner line over.
-        self.stroke_contours(character, breath, cx, cy, sc);
+        // Strokes layered on top — outer glow under, sharper inner line
+        // over. Pass `level` so the stroke pulses with audio.
+        self.stroke_contours(character, breath, state.audio_level, cx, cy, sc);
 
         // ── Accent particle ring (Utopia's lavender motes) ───────
         if let Some(ring) = character.render_config.accent_particles {
@@ -286,7 +303,45 @@ impl Renderer {
             self.draw_voronoi_overlay(mesh, time);
         }
 
+        // ── Vignette pass — radial darkening at the corners. ─────
+        // Always last so it dims everything (background, particles,
+        // contours, overlays) uniformly. Heavy on Oblivion (0.72),
+        // soft on Utopia (0.45).
+        if character.render_config.vignette > 0.001 {
+            self.apply_vignette(character.render_config.vignette);
+        }
+
         &self.pixmap
+    }
+
+    /// Multiply the pixmap by a radial dim factor — `1` at the centre,
+    /// down to `1 - strength` at the far corners. Premultiplied RGBA,
+    /// so we scale R/G/B but keep alpha at 255 (we render opaque).
+    fn apply_vignette(&mut self, strength: f32) {
+        let w = self.settings.width as f32;
+        let h = self.settings.height as f32;
+        let cx = w * 0.5;
+        let cy = h * 0.5;
+        let max_r = (cx * cx + cy * cy).sqrt();
+        let s = strength.clamp(0.0, 1.0);
+        let pw = self.settings.width as usize;
+        let ph = self.settings.height as usize;
+        let data = self.pixmap.data_mut();
+        for py in 0..ph {
+            let dy = py as f32 - cy;
+            for px in 0..pw {
+                let dx = px as f32 - cx;
+                let r = (dx * dx + dy * dy).sqrt() / max_r;
+                // Bias the falloff toward the edges so the centre stays
+                // bright and only the far corners dim hard.
+                let f = (1.0 - s * r * r).clamp(0.0, 1.0);
+                let mul = (f * 255.0) as u32;
+                let off = (py * pw + px) * 4;
+                data[off] = ((data[off] as u32 * mul) / 255) as u8;
+                data[off + 1] = ((data[off + 1] as u32 * mul) / 255) as u8;
+                data[off + 2] = ((data[off + 2] as u32 * mul) / 255) as u8;
+            }
+        }
     }
 
     /// Paint a soft radial gradient behind the face. Manual loop over
@@ -399,12 +454,29 @@ impl Renderer {
 
     /// Draw all contour polylines using tiny_skia's stroker. Two-pass:
     /// a fat outer-glow stroke first, a crisp inner line on top.
-    fn stroke_contours(&mut self, character: &Character, breath: f32, cx: f32, cy: f32, sc: f32) {
+    fn stroke_contours(
+        &mut self,
+        character: &Character,
+        breath: f32,
+        audio: f32,
+        cx: f32,
+        cy: f32,
+        sc: f32,
+    ) {
         let cb: ContourBaseline = character.contour_baseline;
-        let outer_w = cb.outer_width * (1.0 + (breath - 0.5) * cb.breath_depth);
-        let inner_w = cb.inner_width * (1.0 + (breath - 0.5) * cb.breath_depth);
-        let outer_a = (cb.outer_alpha * 255.0) as u8;
-        let inner_a = (cb.inner_alpha * 255.0) as u8;
+        // The breath modulation alone is barely visible (depth ~0.15).
+        // Mixing in `audio_level` makes the contours throb harder when
+        // she speaks — same trick as the avatar's contour pulse, which
+        // multiplies stroke width by `1 + audio`.
+        let breath_factor = 1.0 + (breath - 0.5) * cb.breath_depth;
+        let audio_factor = 1.0 + audio * 0.8;
+        let outer_w = cb.outer_width * breath_factor * audio_factor;
+        let inner_w = cb.inner_width * breath_factor * audio_factor;
+        // Boost alpha with audio too — the contour gets visibly hotter
+        // (not just thicker) under speech.
+        let alpha_boost = 1.0 + audio * 0.4;
+        let outer_a = ((cb.outer_alpha * alpha_boost).min(1.0) * 255.0) as u8;
+        let inner_a = ((cb.inner_alpha * alpha_boost).min(1.0) * 255.0) as u8;
 
         let band_glow = character.render_config.band_glow;
 

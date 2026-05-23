@@ -44,11 +44,19 @@ pub fn build() -> Character {
                 alpha: 0.14,
                 line_width: 0.5,
             }),
-            // No glow halo / nebula / accent ring — Oblivion's
-            // menace comes from sharp lines, not luminance.
+            // No nebula / accent ring — Oblivion's menace comes from
+            // sharp lines, not soft luminance.
             nebula_cloud: None,
             accent_particles: None,
             band_glow: false,
+            // Heavy vignette — drops the corners deep into black so
+            // the predator face spotlights center-screen. Matches
+            // avatar "rage" / "inferno" range (0.7-0.75).
+            vignette: 0.72,
+            // Audio shifts particles toward orange-fire — same hot
+            // colour as the eyes. The face *combusts* when she speaks.
+            audio_glow: [1.0, 0.45, 0.0],
+            audio_glow_strength: 0.85,
         },
     }
 }

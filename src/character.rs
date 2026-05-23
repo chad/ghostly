@@ -174,7 +174,8 @@ impl Default for ContourBaseline {
 /// post-pass on a real GPU pipeline. We carry the values verbatim so a
 /// future wgpu backend can read them; the software backend uses the
 /// subset it can express cheaply (rim glow, voronoi mesh, nebula
-/// cloud, accent-particle ring).
+/// cloud, accent-particle ring, vignette, audio-reactive colour
+/// shifts, audio-reactive contour pulse).
 #[derive(Clone, Debug)]
 pub struct RenderConfig {
     pub fresnel_power: f32,
@@ -192,6 +193,17 @@ pub struct RenderConfig {
     /// Extra glow weight applied to contour strokes — Utopia's wire
     /// bands lean hot at the centre and dim at the edges.
     pub band_glow: bool,
+    /// Radial darkening at the corners (`0..1`). Avatar uses 0.45-0.75
+    /// per emotion — strongly recommended for the "spotlight on the
+    /// face" effect. `0.0` disables.
+    pub vignette: f32,
+    /// Per-particle colour shift toward this RGB when audio is hot —
+    /// avatar's `lowGlow`. Particles already coloured by palette; this
+    /// adds *on top* scaled by `audio_level`.
+    pub audio_glow: [f32; 3],
+    /// Strength multiplier on `audio_glow`. Avatar emotion styles use
+    /// 0.3-1.0 here.
+    pub audio_glow_strength: f32,
 }
 
 impl Default for RenderConfig {
@@ -205,6 +217,10 @@ impl Default for RenderConfig {
             nebula_cloud: None,
             accent_particles: None,
             band_glow: false,
+            vignette: 0.55,
+            // Neutral default — characters override with their accent.
+            audio_glow: [1.0, 1.0, 1.0],
+            audio_glow_strength: 0.4,
         }
     }
 }

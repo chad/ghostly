@@ -143,6 +143,10 @@ fn main() -> ExitCode {
             // Materialize over the first second, then hold.
             let target = if t < 1.0 { t } else { 1.0 };
             state.step(&character, target, dt);
+            state.step_gaze(t, dt);
+            if let Some(cfg) = character.render_config.embers {
+                state.step_embers(&cfg, dt, 3.6);
+            }
             let pixmap = renderer.render(&character, &state, t);
             let path = output.join(format!("{f:04}.png"));
             if let Err(e) = pixmap.save_png(&path) {

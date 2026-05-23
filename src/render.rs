@@ -12,8 +12,42 @@
 
 use tiny_skia::{Color, Paint, PathBuilder, Pixmap, Stroke, Transform};
 
-use crate::character::{AccentParticles, Character, ContourBaseline, NebulaCloud};
+use crate::character::{AccentParticles, Character, ContourBaseline, EmberConfig, NebulaCloud};
 use crate::face::{generate_face, Particle};
+
+/// Linear interpolation between two bytes — returns a `u8` at `t=0.5`
+/// midway between `a` and `b`. `t` is clamped to `0..=1`.
+#[inline]
+fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
+    let af = a as f32;
+    let bf = b as f32;
+    (af + (bf - af) * t.clamp(0.0, 1.0)) as u8
+}
+
+/// Step a PCG-like u64 RNG and return a `0..1` float. Tiny helper for
+/// renderer-thread randomness — no `rand` dependency, no thread-local
+/// thrash, deterministic from a seed.
+#[inline]
+fn next_rand(state: &mut u64) -> f32 {
+    *state = state
+        .wrapping_mul(6_364_136_223_846_793_005)
+        .wrapping_add(1_442_695_040_888_963_407);
+    ((*state >> 32) as u32) as f32 / u32::MAX as f32
+}
+
+/// A single live ember — a spark drifting upward off the face.
+#[derive(Clone, Copy, Debug)]
+struct Ember {
+    /// Position in scene space (post-scale, pre-projection — same
+    /// frame the particle field lives in).
+    pos: [f32; 3],
+    /// Velocity. Mostly +y (rising) with a small per-ember x wander.
+    vel: [f32; 3],
+    /// Seconds since spawn.
+    age: f32,
+    /// Per-ember seed used for horizontal flutter + size jitter.
+    seed: f32,
+}
 
 /// Per-tile mutable state. Holds the particle field plus the cached
 /// animation clock — separate from [`Character`] so the same character
@@ -50,6 +84,17 @@ pub struct FaceState {
     /// `step_gaze` call doesn't need a thread RNG (renderer thread is
     /// not async-runtime-friendly for `rand`).
     gaze_rng: u64,
+    /// Live embers (when the character configured an `EmberConfig`).
+    /// Renderer ticks this every frame: ages each ember, removes the
+    /// expired, spawns new ones up to `EmberConfig::max_alive`.
+    embers: Vec<Ember>,
+    /// Fractional spawn budget — accumulates `spawn_rate * dt` each
+    /// frame so we can spawn N integer embers when the budget rolls
+    /// over. Without this a `spawn_rate=70` with `dt=1/15` would
+    /// always round to 4 and we'd never see the 5th.
+    ember_spawn_budget: f32,
+    /// PRNG for ember spawning.
+    ember_rng: u64,
 }
 
 impl FaceState {
@@ -80,7 +125,61 @@ impl FaceState {
             // from the moment she appears.
             next_gaze_shift_at: 3.0,
             gaze_rng: seed.wrapping_add(0xA5A5_5A5A_C3C3_3C3C),
+            embers: Vec::new(),
+            ember_spawn_budget: 0.0,
+            ember_rng: seed.wrapping_add(0xDEAD_BEEF_CAFE_F00D),
         }
+    }
+
+    /// Advance the ember swarm one frame. Spawns new embers up to the
+    /// configured `max_alive` cap, ages each one, drops expired. Call
+    /// once per frame from the host (skipped automatically when the
+    /// character has no `EmberConfig` — cheap conditional inside).
+    pub fn step_embers(&mut self, cfg: &EmberConfig, dt: f32, scale: f32) {
+        // ── Spawn ──
+        self.ember_spawn_budget += cfg.spawn_rate * dt;
+        while self.ember_spawn_budget >= 1.0 && self.embers.len() < cfg.max_alive {
+            self.ember_spawn_budget -= 1.0;
+            // PRNG step — three rolls per spawn.
+            let r1 = next_rand(&mut self.ember_rng);
+            let r2 = next_rand(&mut self.ember_rng);
+            let r3 = next_rand(&mut self.ember_rng);
+            let r4 = next_rand(&mut self.ember_rng);
+            let r5 = next_rand(&mut self.ember_rng);
+            let r6 = next_rand(&mut self.ember_rng);
+            // Spawn point: across the lower half of the face. x ∈
+            // [-0.35, 0.35], y ∈ [-0.45, 0.1], small z jitter.
+            let sx = (r1 - 0.5) * 0.7 * scale;
+            let sy = (-0.45 + r2 * 0.55) * scale;
+            let sz = (r3 - 0.5) * 0.2 * scale;
+            // Velocity: mostly upward + small horizontal wander +
+            // tiny outward z.
+            let vx = (r4 - 0.5) * 0.35;
+            let vy = cfg.rise_speed * (0.6 + r5 * 0.8);
+            let vz = (r6 - 0.5) * 0.2;
+            self.embers.push(Ember {
+                pos: [sx, sy, sz],
+                vel: [vx, vy, vz],
+                age: 0.0,
+                seed: r1,
+            });
+        }
+        // ── Age + advance + cull ──
+        self.embers.retain_mut(|e| {
+            e.age += dt;
+            if e.age >= cfg.lifetime {
+                return false;
+            }
+            // Sinusoidal horizontal flutter — embers don't fly
+            // straight up, they curl.
+            let flutter = (e.age * 4.0 + e.seed * 13.0).sin() * 0.08;
+            e.pos[0] += (e.vel[0] + flutter) * dt;
+            e.pos[1] += e.vel[1] * dt;
+            e.pos[2] += e.vel[2] * dt;
+            // Slow down vertically as they cool — drag.
+            e.vel[1] *= 1.0 - dt * 0.4;
+            true
+        });
     }
 
     /// Step the head gaze. Call once per frame from the renderer with
@@ -92,22 +191,9 @@ impl FaceState {
     /// a flat rendering pinned to centre.
     pub fn step_gaze(&mut self, time: f32, dt: f32) {
         if time >= self.next_gaze_shift_at {
-            // PCG-like step — cheap deterministic PRNG.
-            self.gaze_rng = self
-                .gaze_rng
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            let r1 = ((self.gaze_rng >> 32) as u32) as f32 / u32::MAX as f32;
-            self.gaze_rng = self
-                .gaze_rng
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            let r2 = ((self.gaze_rng >> 32) as u32) as f32 / u32::MAX as f32;
-            self.gaze_rng = self
-                .gaze_rng
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            let r3 = ((self.gaze_rng >> 32) as u32) as f32 / u32::MAX as f32;
+            let r1 = next_rand(&mut self.gaze_rng);
+            let r2 = next_rand(&mut self.gaze_rng);
+            let r3 = next_rand(&mut self.gaze_rng);
 
             // ±0.45 rad is about ±26°. Strong enough to read as a
             // real head turn from across the room.
@@ -320,9 +406,21 @@ impl Renderer {
             // Size grows with materialization + breath + audio. The
             // audio component makes the field shimmer harder as the
             // agent speaks — same trick face-of-god-face.js uses.
+            //
+            // Eye particles get an extra fast flicker on top, so the
+            // fire eyes *crackle* per-frame rather than reading as a
+            // static orange smudge. Per-particle phase keeps the
+            // flicker uneven across the eye region.
+            let eye_flicker = if p.is_eye {
+                1.0 + (time * 9.0 + p.seed * 14.0).sin().abs() * 0.85
+                    + (time * 17.0 + p.seed * 31.0).sin().abs() * 0.4
+            } else {
+                1.0
+            };
             let size = (1.0 + state.pt[i] * 1.6 + level * 1.4)
                 * depth
-                * breath_pulse;
+                * breath_pulse
+                * eye_flicker;
             let half = size * 0.5;
             let x0 = (sx - half).floor() as i32;
             let y0 = (sy - half).floor() as i32;
@@ -340,9 +438,22 @@ impl Renderer {
             let g_r = character.render_config.audio_glow[0];
             let g_g = character.render_config.audio_glow[1];
             let g_b = character.render_config.audio_glow[2];
-            let cr = p.color[0] * (1.0 - glow_t) + g_r * glow_t;
-            let cg = p.color[1] * (1.0 - glow_t) + g_g * glow_t;
-            let cb = p.color[2] * (1.0 - glow_t) + g_b * glow_t;
+            let mut cr = p.color[0] * (1.0 - glow_t) + g_r * glow_t;
+            let mut cg = p.color[1] * (1.0 - glow_t) + g_g * glow_t;
+            let mut cb = p.color[2] * (1.0 - glow_t) + g_b * glow_t;
+
+            // Eye particles burn brighter — independent of the audio
+            // glow path. White-hot core, full saturation. Combined
+            // with the per-frame size flicker this gives the avatar's
+            // "fire eyes" effect that face-of-god-face.js produces
+            // via its `eyeRim` palette branch.
+            if p.is_eye {
+                let burn = 0.5 + (time * 11.0 + p.seed * 23.0).sin().abs() * 0.5;
+                cr = (cr + (1.0 - cr) * burn).clamp(0.0, 1.0);
+                cg = (cg + (1.0 - cg) * burn * 0.7).clamp(0.0, 1.0);
+                cb = (cb + (1.0 - cb) * burn * 0.2).clamp(0.0, 1.0);
+            }
+
             let r = (cr.clamp(0.0, 1.0) * 255.0) as u32;
             let g = (cg.clamp(0.0, 1.0) * 255.0) as u32;
             let b = (cb.clamp(0.0, 1.0) * 255.0) as u32;
@@ -390,6 +501,13 @@ impl Renderer {
             self.draw_accent_particles(ring, time, cx, cy, sc);
         }
 
+        // ── Embers (Oblivion's rising sparks) ────────────────────
+        // Drawn AFTER the face so they composite on top, but BEFORE
+        // the vignette so they dim with the corner falloff.
+        if let Some(cfg) = character.render_config.embers {
+            self.draw_embers(cfg, state, cx, cy, sc);
+        }
+
         // ── Voronoi-mesh overlay (Oblivion red / Utopia gold) ────
         if let Some(mesh) = character.render_config.voronoi_mesh {
             self.draw_voronoi_overlay(mesh, time);
@@ -404,6 +522,62 @@ impl Renderer {
         }
 
         &self.pixmap
+    }
+
+    /// Splat each live ember as a small bright spot, additively blended.
+    /// Embers fade from `color_hot` → `color_cool` → alpha 0 over their
+    /// lifetime. Position projects through the same perspective as the
+    /// face particles so an ember spawned at z=0.1 reads as closer
+    /// than the face, lending depth.
+    fn draw_embers(&mut self, cfg: EmberConfig, state: &FaceState, cx: f32, cy: f32, sc: f32) {
+        let pw = self.settings.width as usize;
+        let ph = self.settings.height as usize;
+        let data = self.pixmap.data_mut();
+        for e in &state.embers {
+            // Age 0..1 normalised against lifetime.
+            let t = (e.age / cfg.lifetime).clamp(0.0, 1.0);
+            // Bell curve — bright in the middle of life, fade in
+            // quickly + fade out slowly. (1-t) gives linear decay; the
+            // sin curve here gives a nicer ease.
+            let alpha_curve = (1.0 - t).powi(2);
+            if alpha_curve < 0.01 {
+                continue;
+            }
+            // Colour lerp hot → cool.
+            let cr = lerp_u8(cfg.color_hot[0], cfg.color_cool[0], t) as u32;
+            let cg = lerp_u8(cfg.color_hot[1], cfg.color_cool[1], t) as u32;
+            let cb = lerp_u8(cfg.color_hot[2], cfg.color_cool[2], t) as u32;
+            let a = (alpha_curve * 220.0) as u32;
+            // Project (perspective through z, just like face particles).
+            let depth = 1.0 / (2.5 + e.pos[2]);
+            let sx = cx + e.pos[0] * sc * depth;
+            let sy = cy - e.pos[1] * sc * depth;
+            // Size shrinks slightly with age — embers shrink as they
+            // cool. Also a tiny size jitter from the seed.
+            let size = (2.5 * (1.0 - t * 0.5) + e.seed * 0.6) * depth;
+            let half = size * 0.5;
+            let x0 = (sx - half).floor() as i32;
+            let y0 = (sy - half).floor() as i32;
+            let x1 = (sx + half).ceil() as i32;
+            let y1 = (sy + half).ceil() as i32;
+            for py in y0..=y1 {
+                if py < 0 || py >= ph as i32 {
+                    continue;
+                }
+                for px in x0..=x1 {
+                    if px < 0 || px >= pw as i32 {
+                        continue;
+                    }
+                    let off = ((py as usize) * pw + (px as usize)) * 4;
+                    let cr_p = (cr * a) / 255;
+                    let cg_p = (cg * a) / 255;
+                    let cb_p = (cb * a) / 255;
+                    data[off] = (data[off] as u32 + cr_p).min(255) as u8;
+                    data[off + 1] = (data[off + 1] as u32 + cg_p).min(255) as u8;
+                    data[off + 2] = (data[off + 2] as u32 + cb_p).min(255) as u8;
+                }
+            }
+        }
     }
 
     /// Multiply the pixmap by a radial dim factor — `1` at the centre,

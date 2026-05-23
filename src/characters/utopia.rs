@@ -50,6 +50,8 @@ pub fn build() -> Character {
                 color: [255, 200, 40],
                 intensity: 0.5,
             }),
+            // No embers — Utopia is hopeful gold, not on fire.
+            embers: None,
             // Floating lavender motes around the edges.
             accent_particles: Some(AccentParticles {
                 count: 250,

@@ -7,7 +7,8 @@
 //! original so a side-by-side compare reads as the same face.
 
 use crate::character::{
-    Character, ContourBaseline, Geometry, Palette, RenderConfig, Transition, VoronoiMesh,
+    Character, ContourBaseline, EmberConfig, Geometry, Palette, RenderConfig, Transition,
+    VoronoiMesh,
 };
 
 pub fn build() -> Character {
@@ -49,6 +50,18 @@ pub fn build() -> Character {
             nebula_cloud: None,
             accent_particles: None,
             band_glow: false,
+            // Rising embers — small bright orange particles drift up
+            // from the lower face like sparks off a fire. Her
+            // signature flavour. Capped at 120 alive so the render
+            // cost stays bounded (~0.3 ms at 12K particles).
+            embers: Some(EmberConfig {
+                spawn_rate: 70.0,
+                max_alive: 120,
+                color_hot: [255, 200, 60],
+                color_cool: [255, 60, 20],
+                lifetime: 2.4,
+                rise_speed: 0.55,
+            }),
             // Heavy vignette — drops the corners deep into black so
             // the predator face spotlights center-screen. Matches
             // avatar "rage" / "inferno" range (0.7-0.75).

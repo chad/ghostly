@@ -21,6 +21,11 @@ pub struct Particle {
     /// Per-particle seed in `0..1` — drives the displace closure +
     /// alpha shimmer + size flicker.
     pub seed: f32,
+    /// True when this particle sits in an eye region — the renderer
+    /// gives these a per-frame fire flicker (fast pulse + brightness
+    /// boost). Without this the eyes' colour is baked at generation
+    /// time and reads static; with this they visibly *crackle*.
+    pub is_eye: bool,
 }
 
 /// Build `count` particles for a face with the given geometry +
@@ -96,6 +101,23 @@ pub fn generate_face(count: usize, scale: f32, geo: &Geometry, pal: &Palette, se
 
             let color = color_point(nx, ny, depth, pal, geo, &mut rng);
 
+            // Mark eye-region particles so the renderer can give them
+            // a per-frame flicker. The threshold matches the gaussian
+            // sigmas in colorPoint: anything with strong eye-blob
+            // density gets the fire flicker.
+            let eye_sig = 0.045 * geo.eye_size;
+            let eye_sig_y = 0.028 * geo.eye_size;
+            let dx_l = nx - (-geo.eye_spread);
+            let dx_r = nx - geo.eye_spread;
+            let dy = ny - 0.22;
+            let eye_l_g = (-(dx_l * dx_l) / (2.0 * eye_sig * eye_sig)
+                - (dy * dy) / (2.0 * eye_sig_y * eye_sig_y))
+                .exp();
+            let eye_r_g = (-(dx_r * dx_r) / (2.0 * eye_sig * eye_sig)
+                - (dy * dy) / (2.0 * eye_sig_y * eye_sig_y))
+                .exp();
+            let is_eye = eye_l_g.max(eye_r_g) > 0.4;
+
             out.push(Particle {
                 target: [
                     nx * scale * geo.aspect_x,
@@ -104,6 +126,7 @@ pub fn generate_face(count: usize, scale: f32, geo: &Geometry, pal: &Palette, se
                 ],
                 color,
                 seed: rng.f32(),
+                is_eye,
             });
         } else {
             // Ambient — a star around the face.
@@ -122,6 +145,7 @@ pub fn generate_face(count: usize, scale: f32, geo: &Geometry, pal: &Palette, se
                     0.02 + rng.f32() * 0.05,
                 ],
                 seed: rng.f32(),
+                is_eye: false,
             });
         }
     }

@@ -190,6 +190,9 @@ pub struct RenderConfig {
     /// lavender for Utopia, but works for any character that wants a
     /// non-face particle layer.
     pub accent_particles: Option<AccentParticles>,
+    /// Optional rising-ember system — Oblivion's signature "burning"
+    /// flavour. `None` for any character that shouldn't be on fire.
+    pub embers: Option<EmberConfig>,
     /// Extra glow weight applied to contour strokes — Utopia's wire
     /// bands lean hot at the centre and dim at the edges.
     pub band_glow: bool,
@@ -216,6 +219,7 @@ impl Default for RenderConfig {
             voronoi_mesh: None,
             nebula_cloud: None,
             accent_particles: None,
+            embers: None,
             band_glow: false,
             vignette: 0.55,
             // Neutral default — characters override with their accent.
@@ -246,6 +250,25 @@ pub struct AccentParticles {
     /// Mean orbit radius in scene units (multiplied by `min(w,h)*0.38`
     /// at render time — same scale the particle field uses).
     pub radius: f32,
+}
+
+/// Rising-ember particle system — particles spawn at random points on
+/// the lower face, drift upward with slight horizontal wander, and
+/// fade out as they age. Oblivion's signature flavour: she's *burning*.
+#[derive(Clone, Copy, Debug)]
+pub struct EmberConfig {
+    /// New embers per second.
+    pub spawn_rate: f32,
+    /// Maximum embers alive at once. Render cost scales with this.
+    pub max_alive: usize,
+    /// Hot/young ember colour (full opacity).
+    pub color_hot: [u8; 3],
+    /// Cool/old ember colour (fades to alpha zero at lifetime end).
+    pub color_cool: [u8; 3],
+    /// Seconds before an ember fully fades.
+    pub lifetime: f32,
+    /// Average upward speed in scene units per second.
+    pub rise_speed: f32,
 }
 
 /// Faint cracked-glass wireframe overlay (`voronoiMesh` in the JS

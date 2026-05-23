@@ -452,6 +452,14 @@ impl Renderer {
         let cx = w * 0.5;
         let cy = h * 0.5;
         let sc = w.min(h) * 0.38;
+        // Resolution-independent size multiplier. The face GEOMETRY
+        // already scales proportionally via `sc`, but individual
+        // particle / ember / contour pixel sizes were fixed —
+        // meaning at 720p they appeared half their relative size,
+        // making the face look small in the frame. Multiplying by
+        // (min(w,h) / 360) keeps a particle the same RELATIVE size
+        // across resolutions.
+        let pixel_scale = w.min(h) / 360.0;
 
         // Nebula cloud goes underneath everything — a dim radial glow
         // behind the face. Skipped when the character doesn't ask for
@@ -497,9 +505,11 @@ impl Renderer {
 
         // Camera shake — pixel-space jitter applied to every screen
         // position. `shake` decays each frame; phase walks
-        // deterministically so consecutive frames don't desync.
-        let shake_x = (state.shake_phase * 1.7).sin() * state.shake;
-        let shake_y = (state.shake_phase * 2.3 + 0.7).cos() * state.shake;
+        // deterministically so consecutive frames don't desync. The
+        // pixel_scale keeps the shake amplitude visually consistent
+        // across resolutions.
+        let shake_x = (state.shake_phase * 1.7).sin() * state.shake * pixel_scale;
+        let shake_y = (state.shake_phase * 2.3 + 0.7).cos() * state.shake * pixel_scale;
 
         for (i, p) in state.particles.iter().enumerate() {
             let pos = state.live[i];
@@ -595,7 +605,8 @@ impl Renderer {
                 * depth
                 * breath_pulse
                 * eye_flicker
-                * eye_size_mul;
+                * eye_size_mul
+                * pixel_scale;
             let half = size * 0.5;
             let x0 = (sx - half).floor() as i32;
             let y0 = (sy - half).floor() as i32;
@@ -742,6 +753,7 @@ impl Renderer {
             cx,
             cy,
             sc,
+            pixel_scale,
         );
 
         // ── Accent particle ring (Utopia's lavender motes) ───────
@@ -753,7 +765,7 @@ impl Renderer {
         // Drawn AFTER the face so they composite on top, but BEFORE
         // the vignette so they dim with the corner falloff.
         if let Some(cfg) = character.render_config.embers {
-            self.draw_embers(cfg, state, cx, cy, sc);
+            self.draw_embers(cfg, state, cx, cy, sc, pixel_scale);
         }
 
         // ── Voronoi-mesh overlay (Oblivion red / Utopia gold) ────
@@ -777,7 +789,15 @@ impl Renderer {
     /// lifetime. Position projects through the same perspective as the
     /// face particles so an ember spawned at z=0.1 reads as closer
     /// than the face, lending depth.
-    fn draw_embers(&mut self, cfg: EmberConfig, state: &FaceState, cx: f32, cy: f32, sc: f32) {
+    fn draw_embers(
+        &mut self,
+        cfg: EmberConfig,
+        state: &FaceState,
+        cx: f32,
+        cy: f32,
+        sc: f32,
+        pixel_scale: f32,
+    ) {
         let pw = self.settings.width as usize;
         let ph = self.settings.height as usize;
         let data = self.pixmap.data_mut();
@@ -803,7 +823,9 @@ impl Renderer {
             // Size shrinks slightly with age — embers shrink as they
             // cool. Bigger base + more jitter than the original tune
             // so individual embers read as glowing motes, not pixels.
-            let size = (5.0 * (1.0 - t * 0.4) + e.seed * 2.0) * depth;
+            // Scaled by pixel_scale so embers stay the same relative
+            // size at every resolution.
+            let size = (5.0 * (1.0 - t * 0.4) + e.seed * 2.0) * depth * pixel_scale;
             let half = size * 0.5;
             let x0 = (sx - half).floor() as i32;
             let y0 = (sy - half).floor() as i32;
@@ -979,6 +1001,7 @@ impl Renderer {
         cx: f32,
         cy: f32,
         sc: f32,
+        pixel_scale: f32,
     ) {
         let cb: ContourBaseline = character.contour_baseline;
         // The breath modulation alone is barely visible (depth ~0.15).
@@ -987,8 +1010,8 @@ impl Renderer {
         // multiplies stroke width by `1 + audio`.
         let breath_factor = 1.0 + (breath - 0.5) * cb.breath_depth;
         let audio_factor = 1.0 + audio * 0.8;
-        let outer_w = cb.outer_width * breath_factor * audio_factor;
-        let inner_w = cb.inner_width * breath_factor * audio_factor;
+        let outer_w = cb.outer_width * breath_factor * audio_factor * pixel_scale;
+        let inner_w = cb.inner_width * breath_factor * audio_factor * pixel_scale;
         // Boost alpha with audio too — the contour gets visibly hotter
         // (not just thicker) under speech.
         let alpha_boost = 1.0 + audio * 0.4;

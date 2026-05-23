@@ -30,6 +30,12 @@ pub struct FaceState {
     pt: Vec<f32>,
     /// Global `0..=1`: 0 = fully scattered, 1 = fully on the face.
     pub materialized: f32,
+    /// `0..=1` audio loudness — written by the host each frame.
+    /// Drives a per-particle reactive jitter so the face *visibly*
+    /// shimmers when the agent (or someone else) is speaking. Without
+    /// this the face renders motionless except for the breathing
+    /// pulse, which reads as a still image.
+    pub audio_level: f32,
 }
 
 impl FaceState {
@@ -51,7 +57,16 @@ impl FaceState {
             scattered,
             pt,
             materialized: 1.0,
+            audio_level: 0.0,
         }
+    }
+
+    /// Push the current audio loudness (`0..=1`) into the state.
+    /// Renderer reads this each frame to compute per-particle reactive
+    /// jitter — the difference between a still face and a *visibly
+    /// alive* face that shimmers with speech.
+    pub fn set_audio_level(&mut self, level: f32) {
+        self.audio_level = level.clamp(0.0, 1.0);
     }
 
     /// Scatter — fire the character's transition. Each particle gets a
@@ -170,20 +185,36 @@ impl Renderer {
         let data = self.pixmap.data_mut();
         let pw = self.settings.width as usize;
         let ph = self.settings.height as usize;
+        // Audio reactivity multipliers. `idle_drive` ensures the face
+        // is never motionless even in silence (3× the previous idle
+        // amplitude); `react` adds a bigger random kick proportional
+        // to the current audio level, scaled by speed-dependent phases
+        // for shimmer.
+        let level = state.audio_level;
+        let idle_drive = 1.0;
+        let react = level * 4.0;
+
         for (i, p) in state.particles.iter().enumerate() {
             let pos = state.live[i];
 
-            // Idle drift — tiny per-particle wobble so a fully-
-            // materialized face still moves. Cheap, deterministic.
-            let nt = time * 0.25;
+            // Idle drift — a per-particle multi-axis wobble so a
+            // fully-materialized face still breathes visibly even with
+            // no audio. Cheap, deterministic.
+            let nt = time * 0.6 + level * 1.5;
             let idx = i as f32;
-            let drift_x = (idx * 0.00097 + nt).sin()
+            let drift_x = ((idx * 0.00097 + nt).sin()
                 * (idx * 0.00071 + nt * 0.7).cos()
-                * 0.025;
-            let drift_y = (idx * 0.00127 + nt * 1.1).cos()
+                * 0.045
+                + (idx * 0.013 + time * 2.0).sin() * 0.020 * react)
+                * idle_drive;
+            let drift_y = ((idx * 0.00127 + nt * 1.1).cos()
                 * (idx * 0.00089 + nt * 0.5).sin()
-                * 0.020;
-            let drift_z = (idx * 0.00167 + nt * 0.8).sin() * 0.015;
+                * 0.040
+                + (idx * 0.017 + time * 2.3).cos() * 0.018 * react)
+                * idle_drive;
+            let drift_z = ((idx * 0.00167 + nt * 0.8).sin() * 0.030
+                + (idx * 0.021 + time * 1.7).sin() * 0.015 * react)
+                * idle_drive;
 
             let x = pos[0] + drift_x;
             let y = pos[1] + drift_y;
@@ -196,8 +227,12 @@ impl Renderer {
             // Canvas Y is inverted (top-left origin) — flip.
             let sy = cy - y * sc * depth;
 
-            // Size grows with materialization + breath.
-            let size = (1.0 + state.pt[i] * 1.6) * depth * breath_pulse;
+            // Size grows with materialization + breath + audio. The
+            // audio component makes the field shimmer harder as the
+            // agent speaks — same trick face-of-god-face.js uses.
+            let size = (1.0 + state.pt[i] * 1.6 + level * 1.4)
+                * depth
+                * breath_pulse;
             let half = size * 0.5;
             let x0 = (sx - half).floor() as i32;
             let y0 = (sy - half).floor() as i32;

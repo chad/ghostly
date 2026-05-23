@@ -1,0 +1,28 @@
+[package]
+name = "ghostly"
+version = "0.1.0"
+edition = "2021"
+description = "Particle-face character rendering — a Rust port of the avatar visuals (~/src/avatar)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Software raster — same library Eliza's tile uses, so a ghostly frame
+# can drop straight into the existing h264/MoQ broadcast path.
+tiny-skia = "0.11"
+# PNG output for the standalone demo (`ghostly render --output out.png`).
+png = "0.17"
+# Deterministic, fast per-particle randomness — keeps a Character
+# reproducible from a seed. `rand` would be overkill.
+fastrand = "2"
+
+[[bin]]
+name = "ghostly"
+path = "src/main.rs"
+
+[lib]
+name = "ghostly"
+path = "src/lib.rs"
+
+[profile.release]
+opt-level = 3
+lto = "thin"

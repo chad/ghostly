@@ -185,40 +185,48 @@ impl Renderer {
         let data = self.pixmap.data_mut();
         let pw = self.settings.width as usize;
         let ph = self.settings.height as usize;
-        // Audio reactivity multipliers. `idle_drive` ensures the face
-        // is never motionless even in silence (3× the previous idle
-        // amplitude); `react` adds a bigger random kick proportional
-        // to the current audio level, scaled by speed-dependent phases
-        // for shimmer.
+        // Audio reactivity. Idle drift is large enough that a silent
+        // face still visibly *crackles* in place; audio kicks add a
+        // big extra Lissajous on top. Empirically tuned by watching
+        // the avatar reference and matching the felt motion intensity.
         let level = state.audio_level;
-        let idle_drive = 1.0;
-        let react = level * 4.0;
+        let react = level * 8.0;
+
+        // Whole-face gentle sway — a slow ~0.5 Hz Lissajous of the
+        // entire head, so it looks like she's alive and breathing
+        // rather than rendered once and pinned. Independent of the
+        // per-particle drift; this is gross body motion.
+        let sway_x = (time * 0.45).sin() * 0.035 + (time * 0.31 + 1.7).cos() * 0.018;
+        let sway_y = (time * 0.52 + 0.8).sin() * 0.022 + (time * 0.27).cos() * 0.012;
+        let sway_z = (time * 0.38).sin() * 0.030;
 
         for (i, p) in state.particles.iter().enumerate() {
             let pos = state.live[i];
 
-            // Idle drift — a per-particle multi-axis wobble so a
-            // fully-materialized face still breathes visibly even with
-            // no audio. Cheap, deterministic.
-            let nt = time * 0.6 + level * 1.5;
+            // Per-particle idle drift — three independent multi-axis
+            // wobbles per particle so the face never reads as static.
+            // Magnitudes ~5× the original (which was barely visible)
+            // and a 3rd higher-frequency band gives crackle even when
+            // the audio level is zero.
+            let nt = time * 0.9 + level * 2.5;
             let idx = i as f32;
-            let drift_x = ((idx * 0.00097 + nt).sin()
+            let drift_x = (idx * 0.00097 + nt).sin()
                 * (idx * 0.00071 + nt * 0.7).cos()
-                * 0.045
-                + (idx * 0.013 + time * 2.0).sin() * 0.020 * react)
-                * idle_drive;
-            let drift_y = ((idx * 0.00127 + nt * 1.1).cos()
+                * 0.13
+                + (idx * 0.013 + time * 2.0).sin() * 0.06 * (0.6 + react)
+                + (idx * 0.077 + time * 6.4).sin() * 0.025;
+            let drift_y = (idx * 0.00127 + nt * 1.1).cos()
                 * (idx * 0.00089 + nt * 0.5).sin()
-                * 0.040
-                + (idx * 0.017 + time * 2.3).cos() * 0.018 * react)
-                * idle_drive;
-            let drift_z = ((idx * 0.00167 + nt * 0.8).sin() * 0.030
-                + (idx * 0.021 + time * 1.7).sin() * 0.015 * react)
-                * idle_drive;
+                * 0.12
+                + (idx * 0.017 + time * 2.3).cos() * 0.055 * (0.6 + react)
+                + (idx * 0.083 + time * 5.7).cos() * 0.022;
+            let drift_z = (idx * 0.00167 + nt * 0.8).sin() * 0.085
+                + (idx * 0.021 + time * 1.7).sin() * 0.045 * (0.6 + react)
+                + (idx * 0.093 + time * 4.9).sin() * 0.018;
 
-            let x = pos[0] + drift_x;
-            let y = pos[1] + drift_y;
-            let z = pos[2] + drift_z;
+            let x = pos[0] + drift_x + sway_x;
+            let y = pos[1] + drift_y + sway_y;
+            let z = pos[2] + drift_z + sway_z;
 
             // Perspective project. Slightly squashed so particles in
             // front read bigger than ones behind.

@@ -50,26 +50,27 @@ pub fn build() -> Character {
             nebula_cloud: None,
             accent_particles: None,
             band_glow: false,
-            // Rising embers — small bright orange particles drift up
-            // from the lower face like sparks off a fire. Her
-            // signature flavour. Capped at 120 alive so the render
-            // cost stays bounded (~0.3 ms at 12K particles).
+            // Rising embers — bright sparks pour off her like a
+            // forge. ~3× the previous density and longer-lived so
+            // they make it well past her silhouette before fading.
             embers: Some(EmberConfig {
-                spawn_rate: 70.0,
-                max_alive: 120,
-                color_hot: [255, 200, 60],
-                color_cool: [255, 60, 20],
-                lifetime: 2.4,
-                rise_speed: 0.55,
+                spawn_rate: 220.0,
+                max_alive: 340,
+                color_hot: [255, 220, 80],
+                color_cool: [255, 40, 10],
+                lifetime: 3.6,
+                rise_speed: 0.85,
             }),
             // Heavy vignette — drops the corners deep into black so
             // the predator face spotlights center-screen. Matches
             // avatar "rage" / "inferno" range (0.7-0.75).
             vignette: 0.72,
-            // Audio shifts particles toward orange-fire — same hot
-            // colour as the eyes. The face *combusts* when she speaks.
-            audio_glow: [1.0, 0.45, 0.0],
-            audio_glow_strength: 0.85,
+            // Audio shifts particles toward DEEPER red (not orange) —
+            // keeps the cheek/jaw field cool enough that the
+            // white-hot eyes pop in contrast. Previous value (orange
+            // at 0.85) washed the eyes out into the face.
+            audio_glow: [1.0, 0.15, 0.05],
+            audio_glow_strength: 0.45,
         },
     }
 }

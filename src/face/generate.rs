@@ -102,9 +102,10 @@ pub fn generate_face(count: usize, scale: f32, geo: &Geometry, pal: &Palette, se
             let color = color_point(nx, ny, depth, pal, geo, &mut rng);
 
             // Mark eye-region particles so the renderer can give them
-            // a per-frame flicker. The threshold matches the gaussian
-            // sigmas in colorPoint: anything with strong eye-blob
-            // density gets the fire flicker.
+            // a per-frame flicker. Threshold is tight (>0.62) so only
+            // true pupil-area particles get the burn — a looser
+            // threshold made the whole upper face read as one bright
+            // smear, washing out the eyes' silhouette.
             let eye_sig = 0.045 * geo.eye_size;
             let eye_sig_y = 0.028 * geo.eye_size;
             let dx_l = nx - (-geo.eye_spread);
@@ -116,7 +117,7 @@ pub fn generate_face(count: usize, scale: f32, geo: &Geometry, pal: &Palette, se
             let eye_r_g = (-(dx_r * dx_r) / (2.0 * eye_sig * eye_sig)
                 - (dy * dy) / (2.0 * eye_sig_y * eye_sig_y))
                 .exp();
-            let is_eye = eye_l_g.max(eye_r_g) > 0.4;
+            let is_eye = eye_l_g.max(eye_r_g) > 0.62;
 
             out.push(Particle {
                 target: [

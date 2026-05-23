@@ -407,20 +407,24 @@ impl Renderer {
             // audio component makes the field shimmer harder as the
             // agent speaks — same trick face-of-god-face.js uses.
             //
-            // Eye particles get an extra fast flicker on top, so the
-            // fire eyes *crackle* per-frame rather than reading as a
-            // static orange smudge. Per-particle phase keeps the
+            // Eye particles get a much larger base size (so they
+            // bloom into proper fire-orbs even with Oblivion's narrow
+            // predator-slit eye geometry) plus a high-frequency
+            // crackle pulse on top. Per-particle phase keeps the
             // flicker uneven across the eye region.
-            let eye_flicker = if p.is_eye {
-                1.0 + (time * 9.0 + p.seed * 14.0).sin().abs() * 0.85
-                    + (time * 17.0 + p.seed * 31.0).sin().abs() * 0.4
+            let (eye_size_mul, eye_flicker) = if p.is_eye {
+                let f = 1.0
+                    + (time * 9.0 + p.seed * 14.0).sin().abs() * 0.85
+                    + (time * 17.0 + p.seed * 31.0).sin().abs() * 0.4;
+                (3.2, f)
             } else {
-                1.0
+                (1.0, 1.0)
             };
             let size = (1.0 + state.pt[i] * 1.6 + level * 1.4)
                 * depth
                 * breath_pulse
-                * eye_flicker;
+                * eye_flicker
+                * eye_size_mul;
             let half = size * 0.5;
             let x0 = (sx - half).floor() as i32;
             let y0 = (sy - half).floor() as i32;
@@ -442,16 +446,17 @@ impl Renderer {
             let mut cg = p.color[1] * (1.0 - glow_t) + g_g * glow_t;
             let mut cb = p.color[2] * (1.0 - glow_t) + g_b * glow_t;
 
-            // Eye particles burn brighter — independent of the audio
-            // glow path. White-hot core, full saturation. Combined
-            // with the per-frame size flicker this gives the avatar's
-            // "fire eyes" effect that face-of-god-face.js produces
-            // via its `eyeRim` palette branch.
+            // Eye particles burn WHITE-HOT — fully toward (1,1,1) at
+            // peak so they punch a hole in the surrounding red glow.
+            // The burn stays near 1 most of the time with brief dips,
+            // so the contrast stays high frame-to-frame; combined
+            // with the per-frame size flicker the eyes read as
+            // genuinely on fire.
             if p.is_eye {
-                let burn = 0.5 + (time * 11.0 + p.seed * 23.0).sin().abs() * 0.5;
+                let burn = 0.8 + (time * 11.0 + p.seed * 23.0).sin().abs() * 0.2;
                 cr = (cr + (1.0 - cr) * burn).clamp(0.0, 1.0);
-                cg = (cg + (1.0 - cg) * burn * 0.7).clamp(0.0, 1.0);
-                cb = (cb + (1.0 - cb) * burn * 0.2).clamp(0.0, 1.0);
+                cg = (cg + (1.0 - cg) * burn * 0.92).clamp(0.0, 1.0);
+                cb = (cb + (1.0 - cb) * burn * 0.55).clamp(0.0, 1.0);
             }
 
             let r = (cr.clamp(0.0, 1.0) * 255.0) as u32;
@@ -459,8 +464,16 @@ impl Renderer {
             let b = (cb.clamp(0.0, 1.0) * 255.0) as u32;
             // Alpha climbs with materialization + per-particle base +
             // an audio boost so the field reads brighter overall when
-            // she speaks.
-            let a_f = p.color[3] * (0.5 + state.pt[i] * 0.5) * (1.0 + level * 0.6);
+            // she speaks. Non-eye particles get a `0.7×` dim factor
+            // so the eyes — which skip that dim — punch through with
+            // a strong contrast: white-hot pinpoint over a deeper-
+            // red silhouette, instead of two bright spots in a
+            // uniform bright field.
+            let non_eye_dim = if p.is_eye { 1.0 } else { 0.68 };
+            let a_f = p.color[3]
+                * (0.5 + state.pt[i] * 0.5)
+                * (1.0 + level * 0.6)
+                * non_eye_dim;
             if a_f < 0.01 {
                 continue;
             }
@@ -553,8 +566,9 @@ impl Renderer {
             let sx = cx + e.pos[0] * sc * depth;
             let sy = cy - e.pos[1] * sc * depth;
             // Size shrinks slightly with age — embers shrink as they
-            // cool. Also a tiny size jitter from the seed.
-            let size = (2.5 * (1.0 - t * 0.5) + e.seed * 0.6) * depth;
+            // cool. Bigger base + more jitter than the original tune
+            // so individual embers read as glowing motes, not pixels.
+            let size = (5.0 * (1.0 - t * 0.4) + e.seed * 2.0) * depth;
             let half = size * 0.5;
             let x0 = (sx - half).floor() as i32;
             let y0 = (sy - half).floor() as i32;

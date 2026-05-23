@@ -36,6 +36,20 @@ pub struct FaceState {
     /// this the face renders motionless except for the breathing
     /// pulse, which reads as a still image.
     pub audio_level: f32,
+    /// Current head yaw + pitch (radians). Eases each frame toward
+    /// `gaze_yaw_target` / `gaze_pitch_target` — see [`Self::step_gaze`].
+    pub gaze_yaw: f32,
+    pub gaze_pitch: f32,
+    pub gaze_yaw_target: f32,
+    pub gaze_pitch_target: f32,
+    /// When the next gaze shift fires. Picked uniformly in a window
+    /// each time a shift lands, so the head moves at uneven natural
+    /// intervals rather than on a fixed clock.
+    next_gaze_shift_at: f32,
+    /// Simple PRNG state for gaze picks — owned by the state so the
+    /// `step_gaze` call doesn't need a thread RNG (renderer thread is
+    /// not async-runtime-friendly for `rand`).
+    gaze_rng: u64,
 }
 
 impl FaceState {
@@ -58,7 +72,55 @@ impl FaceState {
             pt,
             materialized: 1.0,
             audio_level: 0.0,
+            gaze_yaw: 0.0,
+            gaze_pitch: 0.0,
+            gaze_yaw_target: 0.0,
+            gaze_pitch_target: 0.0,
+            // First shift fires in 2-4s — quick enough to feel alive
+            // from the moment she appears.
+            next_gaze_shift_at: 3.0,
+            gaze_rng: seed.wrapping_add(0xA5A5_5A5A_C3C3_3C3C),
         }
+    }
+
+    /// Step the head gaze. Call once per frame from the renderer with
+    /// the current animation `time` and frame delta `dt`. Picks a new
+    /// target every 2.5-7s, eases the current yaw/pitch toward it.
+    /// Yaw is x-axis turn (±0.45 rad ≈ ±26°); pitch is y-axis nod
+    /// (±0.12 rad ≈ ±7°). Combined with the per-particle drift, the
+    /// face reads as a real being looking around the room rather than
+    /// a flat rendering pinned to centre.
+    pub fn step_gaze(&mut self, time: f32, dt: f32) {
+        if time >= self.next_gaze_shift_at {
+            // PCG-like step — cheap deterministic PRNG.
+            self.gaze_rng = self
+                .gaze_rng
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let r1 = ((self.gaze_rng >> 32) as u32) as f32 / u32::MAX as f32;
+            self.gaze_rng = self
+                .gaze_rng
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let r2 = ((self.gaze_rng >> 32) as u32) as f32 / u32::MAX as f32;
+            self.gaze_rng = self
+                .gaze_rng
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let r3 = ((self.gaze_rng >> 32) as u32) as f32 / u32::MAX as f32;
+
+            // ±0.45 rad is about ±26°. Strong enough to read as a
+            // real head turn from across the room.
+            self.gaze_yaw_target = (r1 - 0.5) * 0.9;
+            self.gaze_pitch_target = (r2 - 0.5) * 0.24;
+            // 2.5-7s before the next shift — uneven so the eye doesn't
+            // catch the rhythm.
+            self.next_gaze_shift_at = time + 2.5 + r3 * 4.5;
+        }
+        // Eased lerp — gentle, never snappy. 1.3 ≈ ~750 ms to settle.
+        let speed = 1.3;
+        self.gaze_yaw += (self.gaze_yaw_target - self.gaze_yaw) * (dt * speed).min(1.0);
+        self.gaze_pitch += (self.gaze_pitch_target - self.gaze_pitch) * (dt * speed).min(1.0);
     }
 
     /// Push the current audio loudness (`0..=1`) into the state.
@@ -224,9 +286,29 @@ impl Renderer {
                 + (idx * 0.021 + time * 1.7).sin() * 0.045 * (0.6 + react)
                 + (idx * 0.093 + time * 4.9).sin() * 0.018;
 
-            let x = pos[0] + drift_x + sway_x;
-            let y = pos[1] + drift_y + sway_y;
-            let z = pos[2] + drift_z + sway_z;
+            let mut x = pos[0] + drift_x + sway_x;
+            let mut y = pos[1] + drift_y + sway_y;
+            let mut z = pos[2] + drift_z + sway_z;
+
+            // Head turn (yaw + pitch). Standard 3D rotation around the
+            // y-axis (yaw) and x-axis (pitch) before projection — so
+            // the entire face turns as a unit toward the current gaze
+            // target. Profile particles drift further left/right than
+            // central ones, exactly as a real head would in motion.
+            let yaw_sin = state.gaze_yaw.sin();
+            let yaw_cos = state.gaze_yaw.cos();
+            let pitch_sin = state.gaze_pitch.sin();
+            let pitch_cos = state.gaze_pitch.cos();
+            // Yaw: rotate (x, z) around y.
+            let rx = x * yaw_cos + z * yaw_sin;
+            let rz = -x * yaw_sin + z * yaw_cos;
+            x = rx;
+            z = rz;
+            // Pitch: rotate (y, z) around x.
+            let ry = y * pitch_cos - z * pitch_sin;
+            let rz2 = y * pitch_sin + z * pitch_cos;
+            y = ry;
+            z = rz2;
 
             // Perspective project. Slightly squashed so particles in
             // front read bigger than ones behind.
@@ -289,9 +371,19 @@ impl Renderer {
         }
 
         // ── Contour pass ──────────────────────────────────────────
-        // Strokes layered on top — outer glow under, sharper inner line
-        // over. Pass `level` so the stroke pulses with audio.
-        self.stroke_contours(character, breath, state.audio_level, cx, cy, sc);
+        // Strokes layered on top — outer glow under, sharper inner
+        // line over. Pass `level` for the audio pulse and the gaze
+        // angles so contours turn with the face.
+        self.stroke_contours(
+            character,
+            breath,
+            state.audio_level,
+            state.gaze_yaw,
+            state.gaze_pitch,
+            cx,
+            cy,
+            sc,
+        );
 
         // ── Accent particle ring (Utopia's lavender motes) ───────
         if let Some(ring) = character.render_config.accent_particles {
@@ -459,6 +551,8 @@ impl Renderer {
         character: &Character,
         breath: f32,
         audio: f32,
+        gaze_yaw: f32,
+        gaze_pitch: f32,
         cx: f32,
         cy: f32,
         sc: f32,
@@ -485,10 +579,31 @@ impl Renderer {
                 continue;
             }
             // Build a tiny_skia path from the normalized polyline.
+            // Contour points are 2D (treated as z=0); apply the same
+            // yaw + pitch transform the particle pass uses so the
+            // contour follows the head turn.
+            let yaw_sin = gaze_yaw.sin();
+            let yaw_cos = gaze_yaw.cos();
+            let pitch_sin = gaze_pitch.sin();
+            let pitch_cos = gaze_pitch.cos();
             let mut pb = PathBuilder::new();
             for (j, p) in path.iter().enumerate() {
-                let sx = cx + p[0] * sc;
-                let sy = cy - p[1] * sc;
+                let mut x = p[0];
+                let mut y = p[1];
+                let mut z = 0.0_f32;
+                // Yaw around y.
+                let rx = x * yaw_cos + z * yaw_sin;
+                let rz = -x * yaw_sin + z * yaw_cos;
+                x = rx;
+                z = rz;
+                // Pitch around x.
+                let ry = y * pitch_cos - z * pitch_sin;
+                let rz2 = y * pitch_sin + z * pitch_cos;
+                y = ry;
+                z = rz2;
+                let depth = 1.0 / (2.5 + z);
+                let sx = cx + x * sc * depth;
+                let sy = cy - y * sc * depth;
                 if j == 0 {
                     pb.move_to(sx, sy);
                 } else {

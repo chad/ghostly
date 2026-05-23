@@ -106,6 +106,36 @@ pub struct FaceState {
     next_blink_at: f32,
     /// PRNG for blink scheduling.
     blink_rng: u64,
+    /// Eye saccade — small offset on top of head yaw/pitch. Eyes
+    /// dart slightly independent of the head for a more alive feel.
+    /// Renderer adds (saccade_x, saccade_y) to eye-particle screen
+    /// position.
+    eye_saccade_x: f32,
+    eye_saccade_y: f32,
+    eye_saccade_target_x: f32,
+    eye_saccade_target_y: f32,
+    next_saccade_at: f32,
+    saccade_rng: u64,
+    /// Speech-onset flash — set to `time` when the audio level crosses
+    /// a rising threshold. Renderer fades a full-field bright tint
+    /// over `SPEECH_FLASH_DURATION` after this. Reads as her
+    /// *reacting* to her own speech rather than passively pulsing.
+    speech_onset_at: f32,
+    /// Previous audio level — used by [`step_audio_onset`] to detect
+    /// the rising edge.
+    prev_audio_level: f32,
+    /// Brow expression — `-1` (full furrow, eyes lowered) to `+1`
+    /// (full raise, surprise). Renderer offsets brow-particle Y by
+    /// this. Host sets it via [`set_brow`] based on emotion.
+    brow: f32,
+    /// Camera shake amount in pixels — eases down each frame.
+    /// [`step_audio_onset`] pumps it up when audio peaks; the
+    /// renderer translates the whole particle field by a sub-pixel
+    /// jitter scaled by this value. Reads as the floor shaking.
+    shake: f32,
+    /// Phase for camera-shake jitter — drives the deterministic
+    /// random walk that turns `shake` into per-frame x/y offsets.
+    shake_phase: f32,
 }
 
 impl FaceState {
@@ -144,7 +174,68 @@ impl FaceState {
             // First blink fires in 2-5s.
             next_blink_at: 3.0,
             blink_rng: seed.wrapping_add(0x1234_5678_9ABC_DEF0),
+            eye_saccade_x: 0.0,
+            eye_saccade_y: 0.0,
+            eye_saccade_target_x: 0.0,
+            eye_saccade_target_y: 0.0,
+            // First saccade fires quickly — gives instant aliveness.
+            next_saccade_at: 1.5,
+            saccade_rng: seed.wrapping_add(0xFACE_BEEF_BAAA_AAAD),
+            speech_onset_at: -10.0,
+            prev_audio_level: 0.0,
+            brow: 0.0,
+            shake: 0.0,
+            shake_phase: 0.0,
         }
+    }
+
+    /// Detect audio onsets — a rising edge in `audio_level` — and:
+    /// 1) trigger a brief full-field bright-tint flash, and
+    /// 2) pump the camera shake.
+    /// Call once per frame from the host (after `set_audio_level`).
+    pub fn step_audio_onset(&mut self, time: f32, dt: f32) {
+        let cur = self.audio_level;
+        let prev = self.prev_audio_level;
+        // Onset = a clear rising edge to a non-trivial level. Tuned
+        // so a single loud syllable fires it, but the background hum
+        // of a quiet conversation doesn't.
+        if cur > 0.18 && cur - prev > 0.08 && time - self.speech_onset_at > 0.45 {
+            self.speech_onset_at = time;
+            // Shake jolt — bigger jolt for louder onset.
+            self.shake = (self.shake + cur * 6.0).min(8.0);
+        }
+        self.prev_audio_level = cur;
+        // Shake decays.
+        self.shake = (self.shake - dt * 12.0).max(0.0);
+        self.shake_phase += dt * 60.0;
+    }
+
+    /// Step the eye saccade — eyes drift to a new small offset every
+    /// 1-3s, eased toward target so the dart is fast but not snappy.
+    /// Magnitude is small (a few % of face width) — humans saccade
+    /// constantly without their face moving with them.
+    pub fn step_eye_saccade(&mut self, time: f32, dt: f32) {
+        if time >= self.next_saccade_at {
+            let r1 = next_rand(&mut self.saccade_rng);
+            let r2 = next_rand(&mut self.saccade_rng);
+            let r3 = next_rand(&mut self.saccade_rng);
+            self.eye_saccade_target_x = (r1 - 0.5) * 0.12;
+            self.eye_saccade_target_y = (r2 - 0.5) * 0.06;
+            self.next_saccade_at = time + 1.0 + r3 * 2.0;
+        }
+        let speed = 6.0; // fast — saccades are quick
+        self.eye_saccade_x +=
+            (self.eye_saccade_target_x - self.eye_saccade_x) * (dt * speed).min(1.0);
+        self.eye_saccade_y +=
+            (self.eye_saccade_target_y - self.eye_saccade_y) * (dt * speed).min(1.0);
+    }
+
+    /// Set the brow expression. `-1.0` = full furrow (concern,
+    /// concentration), `0.0` = neutral, `+1.0` = full raise
+    /// (surprise, curiosity). Host typically derives from the active
+    /// emotion. Clamped on read.
+    pub fn set_brow(&mut self, amount: f32) {
+        self.brow = amount.clamp(-1.0, 1.0);
     }
 
     /// Step the blink. Eyes briefly close at irregular intervals
@@ -393,6 +484,23 @@ impl Renderer {
         let sway_y = (time * 0.52 + 0.8).sin() * 0.022 + (time * 0.27).cos() * 0.012;
         let sway_z = (time * 0.38).sin() * 0.030;
 
+        // Speech-onset flash factor — 1.0 right at onset, decays to
+        // 0 over 400ms. Multiplied into per-particle brightness, so
+        // the whole field briefly tints white when she fires a new
+        // syllable. Reads as her reacting to her own speech.
+        let onset_age = (time - state.speech_onset_at).max(0.0);
+        let speech_flash = if onset_age < 0.4 {
+            ((1.0 - onset_age / 0.4).powi(2)).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+
+        // Camera shake — pixel-space jitter applied to every screen
+        // position. `shake` decays each frame; phase walks
+        // deterministically so consecutive frames don't desync.
+        let shake_x = (state.shake_phase * 1.7).sin() * state.shake;
+        let shake_y = (state.shake_phase * 2.3 + 0.7).cos() * state.shake;
+
         for (i, p) in state.particles.iter().enumerate() {
             let pos = state.live[i];
 
@@ -417,8 +525,13 @@ impl Renderer {
                 + (idx * 0.021 + time * 1.7).sin() * 0.045 * (0.6 + react)
                 + (idx * 0.093 + time * 4.9).sin() * 0.018;
 
+            // Brow particles get an additional vertical offset based
+            // on the current `brow` expression — positive lifts the
+            // brow ridge, negative furrows it.
+            let brow_offset_y = if p.is_brow { state.brow * 0.08 } else { 0.0 };
+
             let mut x = pos[0] + drift_x + sway_x;
-            let mut y = pos[1] + drift_y + sway_y;
+            let mut y = pos[1] + drift_y + sway_y + brow_offset_y;
             let mut z = pos[2] + drift_z + sway_z;
 
             // Head turn (yaw + pitch). Standard 3D rotation around the
@@ -444,9 +557,22 @@ impl Renderer {
             // Perspective project. Slightly squashed so particles in
             // front read bigger than ones behind.
             let depth = 1.0 / (2.5 + z);
-            let sx = cx + x * sc * depth;
+            let mut sx = cx + x * sc * depth;
             // Canvas Y is inverted (top-left origin) — flip.
-            let sy = cy - y * sc * depth;
+            let mut sy = cy - y * sc * depth;
+
+            // Eye saccade — small screen-space offset for is_eye
+            // particles only. Eyes dart slightly independent of the
+            // whole head; gives a vastly more alive impression.
+            if p.is_eye {
+                sx += state.eye_saccade_x * sc * 0.18;
+                sy -= state.eye_saccade_y * sc * 0.18;
+            }
+
+            // Camera shake — applied to every particle's screen
+            // position. Cheap, reads as "the floor shook".
+            sx += shake_x;
+            sy += shake_y;
 
             // Size grows with materialization + breath + audio. The
             // audio component makes the field shimmer harder as the
@@ -518,17 +644,43 @@ impl Renderer {
             // Eye particles also gate by the blink amount — when the
             // face blinks, their alpha drops to near zero for the
             // ~150ms of the blink. Instant "this is alive" cue.
+            //
+            // Mouth particles gate by `audio_level` — when she
+            // speaks, the central mouth particles fade out, carving
+            // a visible opening. Same trick the avatar SVG path uses
+            // for its lip-syncing mouth aperture.
             let non_eye_dim = if p.is_eye { 1.0 } else { 0.68 };
             let blink_gate = if p.is_eye { 1.0 - state.blink } else { 1.0 };
+            let mouth_gate = if p.is_mouth {
+                // Aggressive falloff — even a modest audio level
+                // visibly carves the mouth out.
+                (1.0 - level * 2.2).max(0.05)
+            } else {
+                1.0
+            };
             let a_f = p.color[3]
                 * (0.5 + state.pt[i] * 0.5)
                 * (1.0 + level * 0.6)
                 * non_eye_dim
-                * blink_gate;
+                * blink_gate
+                * mouth_gate;
             if a_f < 0.01 {
                 continue;
             }
             let a = (a_f.min(1.0) * 255.0).min(255.0) as u32;
+
+            // Speech-onset flash — full-field bright tint that decays
+            // over 400ms after each onset. Pushes every particle's
+            // colour briefly toward white.
+            let (r, g, b) = if speech_flash > 0.01 {
+                let push = speech_flash * 0.55;
+                let nr = (r as f32 + (255.0 - r as f32) * push) as u32;
+                let ng = (g as f32 + (255.0 - g as f32) * push) as u32;
+                let nb = (b as f32 + (255.0 - b as f32) * push) as u32;
+                (nr, ng, nb)
+            } else {
+                (r, g, b)
+            };
 
             for py in y0..=y1 {
                 if py < 0 || py >= ph as i32 {

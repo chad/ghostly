@@ -26,6 +26,14 @@ pub struct Particle {
     /// boost). Without this the eyes' colour is baked at generation
     /// time and reads static; with this they visibly *crackle*.
     pub is_eye: bool,
+    /// True when this particle sits in the mouth region. Renderer
+    /// dims these proportional to `audio_level` so the mouth visibly
+    /// *opens* when she speaks — the avatar SVG path does the same.
+    pub is_mouth: bool,
+    /// True when this particle sits on the brow ridge. Renderer
+    /// offsets these vertically by the current `brow` amount, so
+    /// emotion can raise (curiosity) or furrow (concern) the brow.
+    pub is_brow: bool,
 }
 
 /// Build `count` particles for a face with the given geometry +
@@ -119,6 +127,24 @@ pub fn generate_face(count: usize, scale: f32, geo: &Geometry, pal: &Palette, se
                 .exp();
             let is_eye = eye_l_g.max(eye_r_g) > 0.62;
 
+            // Mouth region — gaussian at (0, -0.2), wide-x narrow-y.
+            // Same shape `faceMask` and `colorPoint` use, slightly
+            // tighter so dimming actually carves an opening.
+            let mouth_dx = nx;
+            let mouth_dy = ny - (-0.2);
+            let mouth_g = (-(mouth_dx * mouth_dx) / (2.0 * 0.10_f32 * 0.10)
+                - (mouth_dy * mouth_dy) / (2.0 * 0.018 * 0.018))
+                .exp();
+            let is_mouth = mouth_g > 0.55;
+
+            // Brow ridge region — gaussian at (0, 0.30), wide-x narrow-y.
+            let brow_dx = nx;
+            let brow_dy = ny - 0.30;
+            let brow_g = (-(brow_dx * brow_dx) / (2.0 * 0.22 * 0.22)
+                - (brow_dy * brow_dy) / (2.0 * 0.035 * 0.035))
+                .exp();
+            let is_brow = brow_g > 0.55;
+
             out.push(Particle {
                 target: [
                     nx * scale * geo.aspect_x,
@@ -128,6 +154,8 @@ pub fn generate_face(count: usize, scale: f32, geo: &Geometry, pal: &Palette, se
                 color,
                 seed: rng.f32(),
                 is_eye,
+                is_mouth,
+                is_brow,
             });
         } else {
             // Ambient — a star around the face.
@@ -147,6 +175,8 @@ pub fn generate_face(count: usize, scale: f32, geo: &Geometry, pal: &Palette, se
                 ],
                 seed: rng.f32(),
                 is_eye: false,
+                is_mouth: false,
+                is_brow: false,
             });
         }
     }

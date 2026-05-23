@@ -145,6 +145,8 @@ fn main() -> ExitCode {
             state.step(&character, target, dt);
             state.step_gaze(t, dt);
             state.step_blink(t, dt);
+            state.step_eye_saccade(t, dt);
+            state.step_audio_onset(t, dt);
             if let Some(cfg) = character.render_config.embers {
                 state.step_embers(&cfg, dt, 6.5);
             }

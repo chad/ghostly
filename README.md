@@ -8,14 +8,12 @@ ElevenLabs TTS output before mixing into the agent's broadcast.
 
 ## Status
 
-| Character | Status |
+| Character | Style |
 | --- | --- |
-| **Oblivion** | full implementation — geometry with horns, fire eyes, ominous-sink transition, red voronoi mesh |
-| **Narrator** | placeholder — clean blue ghost stub |
-| **Utopia** | placeholder — gold palette + diamond geometry, full globe wire-band port pending |
-| **Eliza** | placeholder — first-draft teal palette, freeq-side integration pending |
-
-The placeholder modules' doc comments list what's left to port.
+| **Oblivion** | dark red with horns + fire eyes + ominous-sink scatter + voronoi mesh |
+| **Narrator** | calm blue ghost + soft brow/cheek/jaw contours + murmuration scatter |
+| **Utopia** | golden glass orb + 14 flowing wire bands + lavender accent motes + shower-burst scatter |
+| **Eliza** | mint-teal friendly face + alert eyes + scanline-glitch scatter (freeq-native) |
 
 ## Quick start
 
@@ -94,20 +92,20 @@ The renderer mirrors the avatar JS pipeline:
 | `src/characters/oblivion.rs` | `CHARACTERS.oblivion` + `GEOMETRY_PRESETS.oblivion` + `PALETTES.oblivion` + `oblivionContours()` |
 | `src/render.rs` | a subset of `face-of-god-face.js` (the per-frame render) |
 
-## TODO (in rough order)
+## TODO
 
-- Port `narrator` + `utopia` displaces and contour functions.
-- Wire `RenderConfig.fresnel_intensity` into the particle pass — soft
-  rim glow on the field, not just on the contour.
-- Real voronoi cells (Lloyd-relaxed, lower count) — the hex stand-in
-  works but is regular.
-- Audio-reactive particle drift — port the low/mid/high band
-  modulation in `face-of-god-face.js:render` (the heart of the avatar
-  reactiveness).
-- Sentiment-driven palette morphing — port the JS `setEmotion` style
-  blend.
-- Eliza-specific geometry + integration into `freeq-eliza/src/video.rs`
-  as a swappable render backend.
+- Real-time FFT in `freeq-eliza` so the bot's `set_audio_bands` call
+  receives actual low/mid/high energies (currently the audio-band
+  hooks exist in ghostly but the bot passes only `audio_level`).
+- GPU backend (wgpu) — the software raster is fast enough for
+  720p15, but a GPU port would let us bump particle counts past
+  the avatar's 60K reference. The `RenderConfig` knobs
+  (`specular_power`, `specular_intensity`, iridescence) carry
+  through verbatim for that future port.
+- Composite mode in freeq-eliza — particles backend currently no-ops
+  scene cards / whiteboards / vision PiP / ambient HUD; either
+  composite the SVG overlays on top of the particle field, or move
+  those overlays into the ghostly side.
 
 ## License
 

@@ -169,6 +169,16 @@ pub struct FaceState {
     /// Phase for camera-shake jitter — drives the deterministic
     /// random walk that turns `shake` into per-frame x/y offsets.
     shake_phase: f32,
+    /// Status ring — listening intensity. `0..=1`. Renderer paints a
+    /// soft pulsing halo just outside the face, alpha proportional to
+    /// this value. Host updates each frame from a smoothed peer
+    /// loudness signal so the ring breathes with whoever's talking.
+    pub listening_level: f32,
+    /// Status ring — working/thinking flag. Renderer paints a slow
+    /// rotating arc just outside the face whenever this is true, so
+    /// the operator can tell at a glance that an LLM/TTS call is in
+    /// flight versus a quiet idle face.
+    pub working: bool,
 }
 
 impl FaceState {
@@ -223,6 +233,8 @@ impl FaceState {
             brow: 0.0,
             shake: 0.0,
             shake_phase: 0.0,
+            listening_level: 0.0,
+            working: false,
         }
     }
 
@@ -416,6 +428,21 @@ impl FaceState {
     /// Renderer reads this each frame to compute per-particle reactive
     /// jitter — the difference between a still face and a *visibly
     /// alive* face that shimmers with speech.
+    /// Update the listening intensity used by the status halo. `0`
+    /// hides the halo entirely; `1` is full visibility. Callers
+    /// typically pass a smoothed peer-loudness signal so the ring
+    /// breathes with whoever is talking.
+    pub fn set_listening_level(&mut self, level: f32) {
+        self.listening_level = level.clamp(0.0, 1.0);
+    }
+
+    /// Toggle the rotating "working" arc that overlays the status
+    /// halo. Set to `true` whenever an LLM / vision / TTS call is in
+    /// flight, `false` once the call completes.
+    pub fn set_working(&mut self, working: bool) {
+        self.working = working;
+    }
+
     pub fn set_audio_level(&mut self, level: f32) {
         self.audio_level = level.clamp(0.0, 1.0);
     }
@@ -1015,7 +1042,140 @@ impl Renderer {
             self.apply_vignette(character.render_config.vignette);
         }
 
+        // ── Status halo — listening + working ─────────────────────
+        // Drawn AFTER the vignette so the indicator stays bright at
+        // the corners (the vignette would otherwise mute it where the
+        // ring meets the frame edge). Self-gated: noop when the agent
+        // is fully idle (listening_level ≈ 0 and !working).
+        self.paint_status_halo(state, time, cx, cy, sc, pixel_scale);
+
         &self.pixmap
+    }
+
+    /// Paint the per-tile listening + working indicator. Two layers:
+    ///
+    ///   * **Listening** — a soft full-circle halo at the face perimeter
+    ///     whose alpha breathes with `state.listening_level`. Tells the
+    ///     operator the agent is *hearing* sound right now.
+    ///
+    ///   * **Working** — a slow rotating arc (1 rev / 2.4 s) at a
+    ///     slightly larger radius whenever `state.working` is true.
+    ///     Tells the operator an LLM / vision / TTS call is in flight,
+    ///     not that the face is just idle-animating.
+    ///
+    /// Both share the same cool-white accent so the indicator reads
+    /// the same across characters — the FACE carries character; the
+    /// HALO carries state. Heavy alpha-clamping keeps both layers
+    /// artful and subtle rather than aggressive.
+    fn paint_status_halo(
+        &mut self,
+        state: &FaceState,
+        time: f32,
+        cx: f32,
+        cy: f32,
+        sc: f32,
+        pixel_scale: f32,
+    ) {
+        let listening = state.listening_level;
+        if listening < 0.01 && !state.working {
+            return;
+        }
+
+        // Ring sits just outside the face contour. Two different radii
+        // for listen vs. work so the two layers stack legibly when
+        // both fire at once (e.g. listening to a question while the
+        // LLM is still composing the answer).
+        let listen_radius = sc * 1.15;
+        let work_radius = sc * 1.22;
+
+        // Listening: soft pulsing full ring. Alpha couples to level
+        // with a gentle ~1.6 Hz breath on top so even a steady level
+        // reads as alive rather than static.
+        if listening >= 0.01 {
+            let breath = ((time * std::f32::consts::TAU * 1.6).sin() * 0.18) + 0.82;
+            // Cap at 0.55 so it never gets opaque — the FACE has to
+            // remain the focal point; the halo is a tell, not a thing.
+            let alpha = (listening * breath * 0.55).clamp(0.0, 0.55);
+            let mut paint = Paint::default();
+            paint.anti_alias = true;
+            paint.set_color(Color::from_rgba8(
+                170, 220, 240, // cool-white teal
+                (alpha * 255.0) as u8,
+            ));
+            let mut stroke = Stroke::default();
+            stroke.width = (1.8 * pixel_scale).max(1.0);
+            let mut pb = PathBuilder::new();
+            pb.push_circle(cx, cy, listen_radius);
+            if let Some(path) = pb.finish() {
+                self.pixmap.stroke_path(
+                    &path,
+                    &paint,
+                    &stroke,
+                    Transform::identity(),
+                    None,
+                );
+            }
+        }
+
+        // Working: rotating quarter-arc. Same accent colour but
+        // brighter alpha + thinner stroke so it reads as a "scan"
+        // sweeping around the face. 1 revolution every 2.4 s — slow
+        // enough to be subtle, fast enough to be unmistakably alive.
+        if state.working {
+            const REV_SECS: f32 = 2.4;
+            // Sweep covers ~110° (just under a third of the circle).
+            const SWEEP: f32 = std::f32::consts::PI * 0.6;
+            let phase = (time / REV_SECS) * std::f32::consts::TAU;
+            let mut paint = Paint::default();
+            paint.anti_alias = true;
+            paint.set_color(Color::from_rgba8(190, 235, 245, 220));
+            let mut stroke = Stroke::default();
+            stroke.width = (1.5 * pixel_scale).max(1.0);
+            let mut pb = PathBuilder::new();
+            // Approximate the arc as a polyline — push_circle has no
+            // arc-range option in tiny_skia 0.11; 24 segments over a
+            // 110° span is visually smooth.
+            const SEGMENTS: usize = 24;
+            for i in 0..=SEGMENTS {
+                let t = i as f32 / SEGMENTS as f32;
+                let a = phase + t * SWEEP;
+                let x = cx + work_radius * a.cos();
+                let y = cy + work_radius * a.sin();
+                if i == 0 {
+                    pb.move_to(x, y);
+                } else {
+                    pb.line_to(x, y);
+                }
+            }
+            if let Some(path) = pb.finish() {
+                self.pixmap.stroke_path(
+                    &path,
+                    &paint,
+                    &stroke,
+                    Transform::identity(),
+                    None,
+                );
+            }
+            // Bright leading dot at the tip of the arc — gives a
+            // clear sense of direction, like a radar sweep head.
+            let head_a = phase + SWEEP;
+            let head_x = cx + work_radius * head_a.cos();
+            let head_y = cy + work_radius * head_a.sin();
+            let mut head_paint = Paint::default();
+            head_paint.anti_alias = true;
+            head_paint.set_color(Color::from_rgba8(230, 250, 255, 255));
+            let mut head_pb = PathBuilder::new();
+            head_pb.push_circle(head_x, head_y, (2.0 * pixel_scale).max(1.5));
+            if let Some(path) = head_pb.finish() {
+                self.pixmap.fill_path(
+                    &path,
+                    &head_paint,
+                    tiny_skia::FillRule::Winding,
+                    Transform::identity(),
+                    None,
+                );
+            }
+        }
     }
 
     /// Splat each live ember as a small bright spot, additively blended.

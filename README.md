@@ -1,8 +1,8 @@
 # ghostly
 
-A Rust port of the particle-face visuals + per-character voice DSP
-chain from `~/src/avatar`, intended to run server-side and feed an
-H.264 video stream (the same shape the freeq Eliza tile already
+A Rust particle-face visuals + per-character voice DSP
+chain, intended to run server-side and feed an
+H.264 video stream (the same shape the (freeq)[https://freeq.at] Eliza tile already
 broadcasts over MoQ) plus a real-time audio chain that colours
 ElevenLabs TTS output before mixing into the agent's broadcast.
 
@@ -10,7 +10,7 @@ ElevenLabs TTS output before mixing into the agent's broadcast.
 
 | Character | Status |
 | --- | --- |
-| **Oblivion** | full port — geometry with horns, fire eyes, ominous-sink transition, red voronoi mesh |
+| **Oblivion** | full implementation — geometry with horns, fire eyes, ominous-sink transition, red voronoi mesh |
 | **Narrator** | placeholder — clean blue ghost stub |
 | **Utopia** | placeholder — gold palette + diamond geometry, full globe wire-band port pending |
 | **Eliza** | placeholder — first-draft teal palette, freeq-side integration pending |

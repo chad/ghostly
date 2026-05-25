@@ -90,7 +90,11 @@ impl VoiceChain {
             delay: Delay::new(sample_rate, 0.3),
             shimmer: Shimmer::new(sample_rate),
             chorus: Chorus::new(sample_rate),
-            comp_out: Compressor::new(sample_rate, -24.0, 8.0, 0.003, 0.10, 10.0, 4.0),
+            // Makeup gain bumped 4 → 7 dB after the live A/B against
+            // raw ElevenLabs PCM (chain output was ~3 dB quieter even
+            // with formant makeup in place). Pulls level back to the
+            // pre-chain reference; threshold/ratio still catch peaks.
+            comp_out: Compressor::new(sample_rate, -24.0, 8.0, 0.003, 0.10, 10.0, 7.0),
         };
         chain.set_profile(profile);
         chain

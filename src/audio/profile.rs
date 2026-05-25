@@ -121,11 +121,16 @@ pub const CURIOSITY: VoiceProfile = VoiceProfile {
 };
 
 /// ▲ Monolith / Force — OBLIVION. Dark, lowered, mechanical edge.
+/// Dialled down from the avatar's `-4 / -3` to `-2.5 / -1` after the
+/// JS values were over-deepened in the live freeq broadcast — too
+/// far into cartoon-demon territory. Still reads as Oblivion (darker
+/// than baseline, faint mechanical glaze from the comb + bitcrush)
+/// without crossing into novelty.
 pub const PASSION: VoiceProfile = VoiceProfile {
     label: "passion",
-    formant_shift: -4.0,
+    formant_shift: -2.5,
     formant_mix: 1.0,
-    pitch_semitones: -3.0,
+    pitch_semitones: -1.0,
     pitch_cents: 0.0,
     pitch_mix: 1.0,
     eq_low: 3.0,

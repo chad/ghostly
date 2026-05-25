@@ -69,6 +69,11 @@ pub struct VoiceChain {
     shimmer: Shimmer,
     chorus: Chorus,
     comp_out: Compressor,
+    /// Final linear gain applied after the output compressor. Sourced
+    /// from `VoiceProfile::output_gain` so a wet-heavy character
+    /// (Oblivion / Concern) can be brought back to the loudness of a
+    /// near-dry one (Narrator / Calm) without re-tuning every node.
+    output_gain: f32,
 }
 
 impl VoiceChain {
@@ -95,6 +100,7 @@ impl VoiceChain {
             // with formant makeup in place). Pulls level back to the
             // pre-chain reference; threshold/ratio still catch peaks.
             comp_out: Compressor::new(sample_rate, -24.0, 8.0, 0.003, 0.10, 10.0, 7.0),
+            output_gain: 1.0,
         };
         chain.set_profile(profile);
         chain
@@ -122,6 +128,7 @@ impl VoiceChain {
         self.shimmer
             .set(p.shimmer_decay, p.shimmer_amount, p.shimmer_mix);
         self.chorus.set(p.chorus_rate, 0.5, 3, p.chorus_mix);
+        self.output_gain = p.output_gain;
     }
 
     /// Sample rate the chain was constructed with.
@@ -159,6 +166,11 @@ impl VoiceChain {
         s = self.shimmer.step(s);
         s = self.chorus.step(s);
         s = self.comp_out.step(s);
+        // Soft clip after gain so a heavily-coloured profile can be
+        // brought back to reference loudness without ever crossing the
+        // ±1.0 ceiling. `tanh` is gentle enough that mild over-drive
+        // adds character rather than distortion.
+        s = (s * self.output_gain).tanh();
         s
     }
 }

@@ -46,6 +46,14 @@ pub struct VoiceProfile {
     pub shimmer_amount: f32,
     pub chorus_mix: f32,
     pub chorus_rate: f32,
+    /// Per-profile final gain applied AFTER the output compressor.
+    /// Linear (1.0 = pass-through). Compensates for the level loss a
+    /// heavy wet chain (PASSION: full formant + full pitch + delay +
+    /// shimmer + chorus) suffers compared to a near-dry chain (CALM,
+    /// where most node mixes are 0). Tune by ear against the dry
+    /// reference voice — the goal is that switching characters does
+    /// not require touching the listener's volume.
+    pub output_gain: f32,
 }
 
 impl VoiceProfile {
@@ -86,6 +94,9 @@ pub const JOY: VoiceProfile = VoiceProfile {
     shimmer_amount: 0.3,
     chorus_mix: 0.2,
     chorus_rate: 1.8,
+    // ~+3 dB to match the dry reference — JOY has full formant + full
+    // pitch + shimmer + chorus, all of which average the signal down.
+    output_gain: 1.4,
 };
 
 /// ◌ Spectral / Diffuse — distant, dreamy.
@@ -118,6 +129,8 @@ pub const CURIOSITY: VoiceProfile = VoiceProfile {
     shimmer_amount: 0.45,
     chorus_mix: 0.25,
     chorus_rate: 0.7,
+    // ~+3 dB to compensate full formant + full pitch + heavy shimmer.
+    output_gain: 1.4,
 };
 
 /// ▲ Monolith / Force — OBLIVION. Dark, lowered, mechanical edge.
@@ -155,6 +168,13 @@ pub const PASSION: VoiceProfile = VoiceProfile {
     shimmer_amount: 0.15,
     chorus_mix: 0.1,
     chorus_rate: 0.4,
+    // ~+7 dB. The heaviest wet chain — full formant shift, full pitch
+    // shift, comb + bitcrush + freqshift active, delay + shimmer +
+    // chorus. The user A/B-tested live and reported Oblivion was
+    // noticeably quieter than Narrator's dry path; this brings him
+    // back into the same loudness ballpark without driving comp_out
+    // into clipping.
+    output_gain: 2.2,
 };
 
 /// ○ Liminal / Still — NARRATOR. Near-identity, gentle sweetening.
@@ -187,6 +207,10 @@ pub const CALM: VoiceProfile = VoiceProfile {
     shimmer_amount: 0.15,
     chorus_mix: 0.1,
     chorus_rate: 0.4,
+    // Baseline — CALM bypasses formant + pitch + most destruction
+    // nodes (mix=0), so the chain is near-identity and needs no
+    // additional makeup.
+    output_gain: 1.0,
 };
 
 /// ◆ Abyssal / Deity.
@@ -219,6 +243,7 @@ pub const AWE: VoiceProfile = VoiceProfile {
     shimmer_amount: 0.55,
     chorus_mix: 0.25,
     chorus_rate: 0.3,
+    output_gain: 1.6,
 };
 
 /// ♡ Hearthside / Close.
@@ -251,6 +276,7 @@ pub const WARMTH: VoiceProfile = VoiceProfile {
     shimmer_amount: 0.2,
     chorus_mix: 0.15,
     chorus_rate: 0.5,
+    output_gain: 1.5,
 };
 
 /// ★ Stadium / Presence.
@@ -283,6 +309,7 @@ pub const TRIUMPH: VoiceProfile = VoiceProfile {
     shimmer_amount: 0.15,
     chorus_mix: 0.08,
     chorus_rate: 0.4,
+    output_gain: 1.4,
 };
 
 /// ▽ Void / Machine.
@@ -315,6 +342,7 @@ pub const CONCERN: VoiceProfile = VoiceProfile {
     shimmer_amount: 0.15,
     chorus_mix: 0.12,
     chorus_rate: 0.3,
+    output_gain: 2.0,
 };
 
 /// Look up an emotion profile by JS name. Returns [`CALM`] if the

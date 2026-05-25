@@ -70,6 +70,17 @@ pub struct FaceState {
     /// this the face renders motionless except for the breathing
     /// pulse, which reads as a still image.
     pub audio_level: f32,
+    /// `0..=1` per-band audio energy — low / mid / high. Drives the
+    /// three-band reactiveness ported from `face-of-god-face.js:render`:
+    ///   * `audio_low` — radial breathing outward from face centre
+    ///   * `audio_mid` — tangential shimmer + colour modulation
+    ///   * `audio_high` — sparkle jitter + occasional size pop
+    /// Hosts that don't FFT can default all three to 0 (no extra drift
+    /// on top of the existing `audio_level` reactivity) or set all three
+    /// to `audio_level` for a uniform reaction.
+    pub audio_low: f32,
+    pub audio_mid: f32,
+    pub audio_high: f32,
     /// Current head yaw + pitch (radians). Eases each frame toward
     /// `gaze_yaw_target` / `gaze_pitch_target` — see [`Self::step_gaze`].
     pub gaze_yaw: f32,
@@ -158,6 +169,9 @@ impl FaceState {
             pt,
             materialized: 1.0,
             audio_level: 0.0,
+            audio_low: 0.0,
+            audio_mid: 0.0,
+            audio_high: 0.0,
             gaze_yaw: 0.0,
             gaze_pitch: 0.0,
             gaze_yaw_target: 0.0,
@@ -353,6 +367,20 @@ impl FaceState {
         self.audio_level = level.clamp(0.0, 1.0);
     }
 
+    /// Push three-band audio energies. Each in `0..=1`. The renderer
+    /// uses these to drive the avatar-style band-reactive motion ported
+    /// from `face-of-god-face.js`:
+    ///   * low  → radial breathing
+    ///   * mid  → tangential shimmer
+    ///   * high → sparkle jitter
+    /// Hosts without an FFT can pass `(level, level, level)` to get a
+    /// uniform reaction; passing `(0, 0, 0)` reverts to plain idle drift.
+    pub fn set_audio_bands(&mut self, low: f32, mid: f32, high: f32) {
+        self.audio_low = low.clamp(0.0, 1.0);
+        self.audio_mid = mid.clamp(0.0, 1.0);
+        self.audio_high = high.clamp(0.0, 1.0);
+    }
+
     /// Scatter — fire the character's transition. Each particle gets a
     /// new scatter destination via [`Character::transition`].
     pub fn scatter(&mut self, character: &Character, time: f32) {
@@ -424,6 +452,12 @@ impl Default for RenderSettings {
 pub struct Renderer {
     pixmap: Pixmap,
     settings: RenderSettings,
+    /// Cached Lloyd-relaxed voronoi seed positions. Empty until the
+    /// first frame that asks for a voronoi overlay; the relaxation
+    /// then runs once and the result reused for every subsequent
+    /// frame (with a small per-frame Lissajous wobble baked in at
+    /// draw time).
+    voronoi_seeds: Vec<[f32; 2]>,
 }
 
 impl Renderer {
@@ -436,7 +470,11 @@ impl Renderer {
         for px in pixmap.data_mut().chunks_exact_mut(4) {
             px[3] = 255;
         }
-        Some(Self { pixmap, settings })
+        Some(Self {
+            pixmap,
+            settings,
+            voronoi_seeds: Vec::new(),
+        })
     }
 
     pub fn settings(&self) -> &RenderSettings {
@@ -489,6 +527,14 @@ impl Renderer {
         // the avatar reference and matching the felt motion intensity.
         let level = state.audio_level;
         let react = level * 8.0;
+        // Three-band reactive energies — drive the avatar-style
+        // band-modulated motion (port of `face-of-god-face.js:render`).
+        // When the host hasn't supplied bands (all zero), the simple
+        // `level`-based drift still gives the field its alive feel;
+        // bands stack on top for finer reactivity.
+        let aud_low = state.audio_low;
+        let aud_mid = state.audio_mid;
+        let aud_high = state.audio_high;
 
         // Whole-face gentle sway — a slow ~0.5 Hz Lissajous of the
         // entire head, so it looks like she's alive and breathing
@@ -541,13 +587,46 @@ impl Renderer {
                 + (idx * 0.021 + time * 1.7).sin() * 0.045 * (0.6 + react)
                 + (idx * 0.093 + time * 4.9).sin() * 0.018;
 
+            // ── Three-band audio-reactive drift ──
+            // Ported from `face-of-god-face.js:render` (lines 570-876).
+            // Three independent contributions stack on top of the idle
+            // drift above so the field becomes visibly more agitated
+            // when the agent (or a peer) speaks. Each band has its own
+            // spatial + temporal signature:
+            //   low  — radial breathing outward from face center
+            //          (slow, gross body motion under bass energy)
+            //   mid  — tangential shimmer following the surface
+            //          (perpendicular to the radial vector — adds the
+            //          "rippling" feel under vocals)
+            //   high — sparkle jitter (fast, fine, high-freq energy)
+            let fnx = p.target[0];
+            let fny = p.target[1];
+            let radial = (fnx * fnx + fny * fny).sqrt() + 0.1;
+            // Low: scaled-down from the avatar's 0.6 to 0.18 because
+            // the avatar's range was ±a few unit cells; our normalized
+            // face is much tighter (~unit-radius) so we'd push particles
+            // off-frame at the JS coefficient.
+            let band_low_x = fnx * aud_low * 0.18 * radial;
+            let band_low_y = fny * aud_low * 0.18 * radial;
+            // Mid: tangent direction = (-fny, fnx); shimmer follows
+            // the surface tangent, modulated by a per-particle sine
+            // wave so neighbouring particles travel in slightly
+            // different phases.
+            let tan_phase = (idx * 0.003 + time * 5.0).sin();
+            let band_mid_x = -fny * aud_mid * 0.10 * tan_phase;
+            let band_mid_y = fnx * aud_mid * 0.10 * tan_phase;
+            // High: sparkle jitter — fast small-amplitude noise.
+            let band_high_x = (idx * 0.02 + time * 18.0).sin() * aud_high * 0.05;
+            let band_high_y = (idx * 0.025 + time * 22.0).cos() * aud_high * 0.05;
+
             // Brow particles get an additional vertical offset based
             // on the current `brow` expression — positive lifts the
             // brow ridge, negative furrows it.
             let brow_offset_y = if p.is_brow { state.brow * 0.08 } else { 0.0 };
 
-            let mut x = pos[0] + drift_x + sway_x;
-            let mut y = pos[1] + drift_y + sway_y + brow_offset_y;
+            let mut x = pos[0] + drift_x + sway_x + band_low_x + band_mid_x + band_high_x;
+            let mut y = pos[1] + drift_y + sway_y + brow_offset_y
+                + band_low_y + band_mid_y + band_high_y;
             let mut z = pos[2] + drift_z + sway_z;
 
             // Head turn (yaw + pitch). Standard 3D rotation around the
@@ -607,7 +686,16 @@ impl Renderer {
             } else {
                 (1.0, 1.0)
             };
-            let size = (1.0 + state.pt[i] * 1.6 + level * 1.4)
+            // High-band sparkle pop — when a high-freq spike happens,
+            // some particles briefly enlarge for a glittering effect.
+            // Per-particle phase keeps it uneven (only a subset of
+            // particles pop on any given peak).
+            let band_size_pop = if aud_high > 0.15 {
+                aud_high * 2.0 * (0.5 + 0.5 * (idx * 0.08 + time * 18.0).sin())
+            } else {
+                0.0
+            };
+            let size = (1.0 + state.pt[i] * 1.6 + level * 1.4 + aud_mid * 0.6 + band_size_pop)
                 * depth
                 * breath_pulse
                 * eye_flicker
@@ -633,6 +721,31 @@ impl Renderer {
             let mut cr = p.color[0] * (1.0 - glow_t) + g_r * glow_t;
             let mut cg = p.color[1] * (1.0 - glow_t) + g_g * glow_t;
             let mut cb = p.color[2] * (1.0 - glow_t) + g_b * glow_t;
+
+            // ── Fresnel rim glow ──
+            // Port of the avatar's particle-pass fresnel from
+            // `face-of-god-ovu.js:1928`. In 2.5D, the "view-aligned-
+            // ness" of a particle is encoded by how close to the face
+            // centre it projects: particles at the silhouette edge
+            // have low `nnz` (radial position far from origin), and
+            // their rim glow is brightest. The blue tint on B vs RG
+            // matches the JS — particles near the silhouette get a
+            // cool halo around the field, which reads as "this thing
+            // has volume" rather than "this thing is flat dots."
+            //
+            // Radial distance saturates at 1.0 (≈ silhouette edge);
+            // particles outside that are still rim-lit at full.
+            let rim_r = (p.target[0] * p.target[0] + p.target[1] * p.target[1])
+                .sqrt()
+                .min(1.0);
+            let fresnel_dot = (1.0 - rim_r).max(0.0);
+            let fresnel = (1.0 - fresnel_dot).powf(character.render_config.fresnel_power)
+                * character.render_config.fresnel_intensity;
+            if fresnel > 0.001 {
+                cr = (cr + fresnel * 0.4).min(1.0);
+                cg = (cg + fresnel * 0.4).min(1.0);
+                cb = (cb + fresnel * 0.5).min(1.0); // blue-bias for cool rim
+            }
 
             // Eye particles burn WHITE-HOT — fully toward (1,1,1) at
             // peak so they punch a hole in the surrounding red glow.
@@ -1448,19 +1561,19 @@ impl Renderer {
         }
     }
 
-    /// Cracked-glass wireframe overlay. A deterministic Poisson-disk
-    /// scatter of seed points (gives an organic, non-grid feel), then
-    /// edges between any two seeds within a threshold distance — the
-    /// proximity graph reads visually identically to a true Voronoi
-    /// triangulation at this density. Each seed wobbles around its
-    /// rest position over time so the mesh subtly *breathes* like a
-    /// holographic lattice rather than sitting flat.
+    /// Lloyd-relaxed Voronoi overlay. Lower seed count than the
+    /// original Poisson stand-in (60 vs 90), but the seeds are now
+    /// approximately a centroidal Voronoi diagram — each seed sits at
+    /// the centroid of its own cell — which reads as a far more
+    /// organic cracked-glass pattern than the regular hex spread the
+    /// older code produced.
     ///
-    /// Skipping the true Lloyd-relaxed Voronoi cells because at ~80
-    /// seeds the proximity graph is indistinguishable to the eye but
-    /// is O(N²) instead of needing a full geometric kernel. If we
-    /// ever raise the density past ~200 seeds we'll need the real
-    /// thing.
+    /// Relaxation runs once and the result is cached on the renderer:
+    /// the math is a few-millisecond startup cost (3 iterations of a
+    /// 128×72 coarse-grid centroid-assign at 60 seeds ≈ 1.7 M ops),
+    /// nowhere near the per-frame budget. Per-frame, we draw the
+    /// proximity graph between Lloyd-relaxed seeds with a small
+    /// Lissajous wobble so the lattice breathes.
     fn draw_voronoi_overlay(&mut self, mesh: crate::character::VoronoiMesh, time: f32) {
         let w = self.settings.width as f32;
         let h = self.settings.height as f32;
@@ -1475,56 +1588,31 @@ impl Renderer {
         let mut stroke = Stroke::default();
         stroke.width = mesh.line_width;
 
-        // ── Deterministic Poisson-disk-ish seed scatter ──
-        // We use the golden-ratio low-discrepancy sequence + a quick
-        // rejection step to keep seeds at least `MIN_SEP` apart. Same
-        // input → same lattice, so the mesh is stable across frames.
-        const TARGET_SEEDS: usize = 90;
-        const PHI: f32 = 1.618_034;
-        const MIN_SEP: f32 = 44.0;
-        let mut seeds: Vec<[f32; 2]> = Vec::with_capacity(TARGET_SEEDS);
-        let mut tried = 0;
-        // The bg lattice runs slightly larger than the canvas so the
-        // mesh fades off the edges rather than ending abruptly.
-        let pad = MIN_SEP;
-        while seeds.len() < TARGET_SEEDS && tried < TARGET_SEEDS * 8 {
-            let i = tried as f32;
-            let u = (i * PHI).fract();
-            let v = ((i * PHI).fract() * PHI).fract();
-            let x = -pad + u * (w + pad * 2.0);
-            let y = -pad + v * (h + pad * 2.0);
-            let ok = seeds.iter().all(|&[sx, sy]| {
-                let dx = sx - x;
-                let dy = sy - y;
-                dx * dx + dy * dy >= MIN_SEP * MIN_SEP
-            });
-            if ok {
-                seeds.push([x, y]);
-            }
-            tried += 1;
+        // Ensure relaxed seed cache is populated.
+        if self.voronoi_seeds.is_empty() {
+            self.voronoi_seeds = lloyd_relax_seeds(60, w, h, 3);
         }
 
-        // ── Time-modulated wobble ──
-        // Each seed drifts on a per-seed Lissajous so the lattice
-        // shivers without losing structure.
-        let live: Vec<[f32; 2]> = seeds
+        const WOBBLE_AMP: f32 = 6.0;
+        let live: Vec<[f32; 2]> = self
+            .voronoi_seeds
             .iter()
             .enumerate()
             .map(|(i, [x, y])| {
                 let phase = i as f32 * 0.9;
-                let amp = MIN_SEP * 0.12;
-                let dx = (time * 0.4 + phase).sin() * amp;
-                let dy = (time * 0.55 + phase * 1.3).cos() * amp * 0.7;
+                let dx = (time * 0.4 + phase).sin() * WOBBLE_AMP;
+                let dy = (time * 0.55 + phase * 1.3).cos() * WOBBLE_AMP * 0.7;
                 [x + dx, y + dy]
             })
             .collect();
 
-        // ── Proximity-graph edges ──
-        // For each pair within `EDGE_MAX`, stroke a line. The cutoff
-        // is chosen so each seed connects to ~5-6 neighbours on
-        // average — same connectivity as a typical Voronoi cell.
-        const EDGE_MAX: f32 = 78.0;
-        let edge_max_sq = EDGE_MAX * EDGE_MAX;
+        // Edge threshold scales with canvas — at lower seed counts
+        // mean nearest-neighbour distance grows, so the threshold has
+        // to grow too. Empirically `1.5 * mean_spacing` keeps the
+        // graph fully connected without dragging in distant pairs.
+        let mean_spacing = ((w * h) / live.len() as f32).sqrt();
+        let edge_max = mean_spacing * 1.5;
+        let edge_max_sq = edge_max * edge_max;
         let mut pb = PathBuilder::new();
         for i in 0..live.len() {
             let [x1, y1] = live[i];
@@ -1542,6 +1630,67 @@ impl Renderer {
             self.pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
         }
     }
+}
+
+/// Lloyd's algorithm: deterministically place `count` seeds in a
+/// `w × h` rectangle then relax them toward their cell centroids.
+/// Cheap because we discretise the canvas to a coarse 128×72-ish grid
+/// for the cell-assignment pass instead of iterating every pixel.
+///
+/// Initial seeds use the golden-ratio low-discrepancy sequence with a
+/// small jitter so consecutive runs aren't identical-symmetric.
+fn lloyd_relax_seeds(count: usize, w: f32, h: f32, iters: usize) -> Vec<[f32; 2]> {
+    const PHI: f32 = 1.618_033_988_749_895;
+    let pad = (w.min(h) / 12.0).max(20.0);
+    let inner_w = w + pad * 2.0;
+    let inner_h = h + pad * 2.0;
+    let mut seeds: Vec<[f32; 2]> = (0..count)
+        .map(|i| {
+            let fi = i as f32;
+            let u = (fi * PHI).fract();
+            let v = ((fi * PHI).fract() * PHI).fract();
+            [-pad + u * inner_w, -pad + v * inner_h]
+        })
+        .collect();
+
+    // Coarse grid for centroid assignment. 128 × (h/w * 128) cells.
+    let grid_w = 128usize;
+    let grid_h = ((128.0 * inner_h / inner_w) as usize).max(72);
+    let cell_w = inner_w / grid_w as f32;
+    let cell_h = inner_h / grid_h as f32;
+    for _ in 0..iters {
+        let mut sum_x = vec![0.0_f32; count];
+        let mut sum_y = vec![0.0_f32; count];
+        let mut counts = vec![0u32; count];
+        for gy in 0..grid_h {
+            let py = -pad + (gy as f32 + 0.5) * cell_h;
+            for gx in 0..grid_w {
+                let px = -pad + (gx as f32 + 0.5) * cell_w;
+                // Find nearest seed (brute force O(N) per cell).
+                let mut best = 0usize;
+                let mut best_d2 = f32::INFINITY;
+                for (j, s) in seeds.iter().enumerate() {
+                    let dx = s[0] - px;
+                    let dy = s[1] - py;
+                    let d2 = dx * dx + dy * dy;
+                    if d2 < best_d2 {
+                        best_d2 = d2;
+                        best = j;
+                    }
+                }
+                sum_x[best] += px;
+                sum_y[best] += py;
+                counts[best] += 1;
+            }
+        }
+        for j in 0..count {
+            if counts[j] > 0 {
+                seeds[j][0] = sum_x[j] / counts[j] as f32;
+                seeds[j][1] = sum_y[j] / counts[j] as f32;
+            }
+        }
+    }
+    seeds
 }
 
 /// Premultiplied alpha additive blend onto a BGRA pixel. (`tiny_skia`

@@ -65,12 +65,18 @@ impl VoiceProfile {
 
 /// ✧ Luminous / Fae — UTOPIA. Lifted formants, slight detune up,
 /// crystalline shimmer.
+///
+/// Dialled back from the avatar's `+4 / +2` to `+1.5 / +1` after the
+/// live A/B — the original lift pushed Utopia's natural register too
+/// high (chipmunk territory). The lighter touch keeps the sense of
+/// warmth and brightness without taking the speaker's own voice out
+/// from under it. Shimmer + chorus carry the rest of the sparkle.
 pub const JOY: VoiceProfile = VoiceProfile {
     label: "joy",
-    formant_shift: 4.0,
-    formant_mix: 1.0,
-    pitch_semitones: 2.0,
-    pitch_cents: 15.0,
+    formant_shift: 1.5,
+    formant_mix: 0.8,
+    pitch_semitones: 1.0,
+    pitch_cents: 8.0,
     pitch_mix: 1.0,
     eq_low: -1.0,
     eq_mid: 1.0,

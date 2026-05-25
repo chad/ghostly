@@ -24,6 +24,22 @@ fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
     (af + (bf - af) * t.clamp(0.0, 1.0)) as u8
 }
 
+/// Stable hash of a nick → `0..1` float. Used by the gaze-lock path
+/// so the same nick always maps to the same yaw/pitch — when the bot
+/// is "looking at" a specific participant, its eyes turn the same
+/// way every time. Two different `seed`s let the caller derive two
+/// independent values (yaw + pitch) from one input.
+#[inline]
+fn hash_nick(nick: &str, seed: u32) -> f32 {
+    // FNV-1a — small, stable, no deps. Good enough for a 2D fan-out.
+    let mut h: u32 = 0x811c9dc5 ^ seed;
+    for b in nick.as_bytes() {
+        h ^= *b as u32;
+        h = h.wrapping_mul(0x01000193);
+    }
+    (h as f32) / (u32::MAX as f32)
+}
+
 /// Step a PCG-like u64 RNG and return a `0..1` float. Tiny helper for
 /// renderer-thread randomness — no `rand` dependency, no thread-local
 /// thrash, deterministic from a seed.
@@ -87,6 +103,12 @@ pub struct FaceState {
     pub gaze_pitch: f32,
     pub gaze_yaw_target: f32,
     pub gaze_pitch_target: f32,
+    /// Optional sticky gaze target — a participant nick. When set,
+    /// `step_gaze` ignores the random idle drift and points the head
+    /// at a deterministic yaw/pitch derived from the nick (a stable
+    /// hash → unit-circle position). Clear it when the conversation
+    /// loses its focus subject; the random idle drift resumes.
+    pub gaze_lock_nick: Option<String>,
     /// When the next gaze shift fires. Picked uniformly in a window
     /// each time a shift lands, so the head moves at uneven natural
     /// intervals rather than on a fixed clock.
@@ -176,6 +198,7 @@ impl FaceState {
             gaze_pitch: 0.0,
             gaze_yaw_target: 0.0,
             gaze_pitch_target: 0.0,
+            gaze_lock_nick: None,
             // First shift fires in 2-4s — quick enough to feel alive
             // from the moment she appears.
             next_gaze_shift_at: 3.0,
@@ -339,8 +362,30 @@ impl FaceState {
     /// (±0.12 rad ≈ ±7°). Combined with the per-particle drift, the
     /// face reads as a real being looking around the room rather than
     /// a flat rendering pinned to centre.
+    ///
+    /// If `gaze_lock_nick` is set, the random idle schedule is
+    /// skipped and the target yaw/pitch is derived from a stable
+    /// hash of the nick — meaning the face deterministically points
+    /// in the *same* direction for the same nick every time. The
+    /// host calls [`Self::set_gaze_lock`] when it knows who the bot
+    /// is currently talking to (the user who just addressed it, or
+    /// the loudest peer) and clears the lock when the focus is over.
     pub fn step_gaze(&mut self, time: f32, dt: f32) {
-        if time >= self.next_gaze_shift_at {
+        if let Some(nick) = self.gaze_lock_nick.clone() {
+            // Sticky targeting — derive a deterministic but
+            // distinct-feeling angle from the nick. Two simple hashes
+            // (different seeds) → yaw + pitch within the same range
+            // the random idle path uses.
+            let h1 = hash_nick(&nick, 0x9E37_79B9);
+            let h2 = hash_nick(&nick, 0x85EB_CA77);
+            let yaw_target = (h1 - 0.5) * 0.9;
+            let pitch_target = (h2 - 0.5) * 0.24;
+            self.gaze_yaw_target = yaw_target;
+            self.gaze_pitch_target = pitch_target;
+            // While locked, push the next random shift far out so it
+            // doesn't immediately fight the lock when cleared.
+            self.next_gaze_shift_at = time + 1.5;
+        } else if time >= self.next_gaze_shift_at {
             let r1 = next_rand(&mut self.gaze_rng);
             let r2 = next_rand(&mut self.gaze_rng);
             let r3 = next_rand(&mut self.gaze_rng);
@@ -357,6 +402,14 @@ impl FaceState {
         let speed = 1.3;
         self.gaze_yaw += (self.gaze_yaw_target - self.gaze_yaw) * (dt * speed).min(1.0);
         self.gaze_pitch += (self.gaze_pitch_target - self.gaze_pitch) * (dt * speed).min(1.0);
+    }
+
+    /// Lock the gaze on a specific participant. The bot's face will
+    /// deterministically point in the direction associated with that
+    /// nick. Pass `None` to release; idle random gaze resumes after
+    /// a beat.
+    pub fn set_gaze_lock(&mut self, nick: Option<String>) {
+        self.gaze_lock_nick = nick;
     }
 
     /// Push the current audio loudness (`0..=1`) into the state.

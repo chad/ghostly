@@ -29,6 +29,7 @@
 //! pixmap.save_png("oblivion.png").unwrap();
 //! ```
 
+pub mod audio;
 pub mod character;
 pub mod characters;
 pub mod face;

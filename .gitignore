@@ -2,3 +2,13 @@
 *.png
 !docs/**/*.png
 .DS_Store
+
+# Generated outputs from the CLI demos — `cargo run -- oblivion --output …`
+# and `cargo run -- voice …`. Keep them out of git; the README shows how
+# to regenerate.
+/anim/
+/anim_hd/
+/voice_test/
+*.mp4
+*.wav
+*.aiff

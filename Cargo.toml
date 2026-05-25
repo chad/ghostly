@@ -14,6 +14,17 @@ png = "0.17"
 # Deterministic, fast per-particle randomness — keeps a Character
 # reproducible from a seed. `rand` would be overkill.
 fastrand = "2"
+# Real-time DSP. Used selectively for the voice-effects chain — fundsp
+# provides the biquad filter primitives we need for EQ / formant
+# bandpasses / comb damping. The rest of the chain (granular pitch
+# shifter, glitch buffer, Hilbert freq shifter, shimmer reverb, chorus)
+# is hand-rolled because it ports directly from the avatar's
+# AudioWorklets and a graph-style abstraction would add friction.
+fundsp = "0.20"
+# WAV I/O for the offline-test CLI (`ghostly voice <character>
+# --input in.wav --output out.wav`). The live-stream API takes raw
+# f32 slices and never touches `hound`.
+hound = "3"
 
 [[bin]]
 name = "ghostly"

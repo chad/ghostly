@@ -407,6 +407,12 @@ impl Default for RenderSettings {
         Self {
             width: 640,
             height: 360,
+            // 0.22 = ~78% of the previous frame retained between
+            // renders. The trail blend is what makes the field
+            // accumulate to a visible silhouette over the first few
+            // frames in the freeq render loop — bumping it higher
+            // halves cumulative brightness and the face reads as
+            // black through the broadcast.
             trail: 0.22,
         }
     }
@@ -660,7 +666,13 @@ impl Renderer {
             // speaks, the central mouth particles fade out, carving
             // a visible opening. Same trick the avatar SVG path uses
             // for its lip-syncing mouth aperture.
-            let non_eye_dim = if p.is_eye { 1.0 } else { 0.68 };
+            // Was tuned to 0.45 for the 720p single-PNG demo so eyes
+            // would punch through, but at the freeq render's 28k
+            // particles / 1280×720 the field was so dim it barely
+            // survived H.264 quantization — bot tile read as black.
+            // 0.62 keeps the eye-pop while restoring enough field
+            // brightness to be a recognisable face under encoding.
+            let non_eye_dim = if p.is_eye { 1.0 } else { 0.62 };
             let blink_gate = if p.is_eye { 1.0 - state.blink } else { 1.0 };
             let mouth_gate = if p.is_mouth {
                 // Aggressive falloff — even a modest audio level
@@ -693,39 +705,82 @@ impl Renderer {
                 (r, g, b)
             };
 
+            // Soft circular splat — particles get a quadratic radial
+            // falloff (bright centre, transparent edge) instead of a
+            // flat square fill. Two wins: (1) at high density the face
+            // no longer additively saturates to white because each
+            // splat's edge contributes near-zero alpha, leaving room
+            // for the eye-burn to actually punch through; (2) the
+            // particle field reads as crisp glowing motes instead of a
+            // soft uniform blob. A small `+0.5` pixel-centre bias is
+            // standard sub-pixel-stable splatting.
+            let rad_sq = (half * half).max(0.25);
+            let inv_rad_sq = 1.0 / rad_sq;
             for py in y0..=y1 {
                 if py < 0 || py >= ph as i32 {
                     continue;
                 }
+                let ddy = py as f32 + 0.5 - sy;
+                let ddy_sq = ddy * ddy;
                 for px in x0..=x1 {
                     if px < 0 || px >= pw as i32 {
                         continue;
                     }
+                    let ddx = px as f32 + 0.5 - sx;
+                    let d2 = ddx * ddx + ddy_sq;
+                    if d2 >= rad_sq {
+                        continue;
+                    }
+                    // Linear-ish falloff with a small offset so the
+                    // splat has a flat-ish bright core and a soft
+                    // edge — still anti-aliased but ~2× the energy
+                    // of pure quadratic. Pure `f*f` was too dim at
+                    // 28k particles spread across 1280×720; the
+                    // additive accumulation didn't build up enough
+                    // to read as a face after video encoding.
+                    let f = 1.0 - d2 * inv_rad_sq;
+                    let aa = ((a as f32) * (f * 0.4 + f * f * 0.6)) as u8;
+                    if aa < 1 {
+                        continue;
+                    }
                     let off = ((py as usize) * pw + (px as usize)) * 4;
-                    // Premultiplied additive-screen blend onto BGRA.
-                    blend_add_premul(&mut data[off..off + 4], r as u8, g as u8, b as u8, a as u8);
+                    blend_add_premul(&mut data[off..off + 4], r as u8, g as u8, b as u8, aa);
                 }
             }
 
             // ── Bloom halo ──
-            // A second, larger, dimmer splat around each particle.
-            // Approximates the Gaussian glow that makes the avatar
-            // reference *pop* — particles read as glowing fire
-            // instead of discrete dots — without paying for a full
-            // blur post-pass. Skipped for already-dim particles
-            // (a<40) so the halo cost only fires where it matters.
+            // A second, larger, dimmer radial splat around each
+            // particle. Same radial-falloff trick — gives a true
+            // gaussian-ish glow rather than a square plateau that
+            // smears adjacent particles into one bright slab. Skipped
+            // for already-dim particles (a<40) so the halo cost only
+            // fires where it matters.
             if a >= 40 {
-                let halo_size = (size * 2.2).max(4.0);
+                let halo_size = (size * 1.9).max(4.0);
                 let halo_half = halo_size * 0.5;
-                let halo_a = (a as f32 * 0.22) as u8;
-                if halo_a >= 4 {
+                let halo_a_base = a as f32 * 0.42;
+                if halo_a_base >= 4.0 {
                     let hx0 = ((sx - halo_half).floor() as i32).max(0);
                     let hy0 = ((sy - halo_half).floor() as i32).max(0);
                     let hx1 = ((sx + halo_half).ceil() as i32).min(pw as i32 - 1);
                     let hy1 = ((sy + halo_half).ceil() as i32).min(ph as i32 - 1);
+                    let halo_rad_sq = (halo_half * halo_half).max(0.25);
+                    let inv_halo_rad_sq = 1.0 / halo_rad_sq;
                     for py in hy0..=hy1 {
                         let row_off = py as usize * pw;
+                        let ddy = py as f32 + 0.5 - sy;
+                        let ddy_sq = ddy * ddy;
                         for px in hx0..=hx1 {
+                            let ddx = px as f32 + 0.5 - sx;
+                            let d2 = ddx * ddx + ddy_sq;
+                            if d2 >= halo_rad_sq {
+                                continue;
+                            }
+                            let f = 1.0 - d2 * inv_halo_rad_sq;
+                            let halo_a = (halo_a_base * f * f) as u8;
+                            if halo_a < 2 {
+                                continue;
+                            }
                             let off = (row_off + px as usize) * 4;
                             blend_add_premul(
                                 &mut data[off..off + 4],
@@ -741,15 +796,28 @@ impl Renderer {
         }
 
         // ── Contour pass ──────────────────────────────────────────
-        // Strokes layered on top — outer glow under, sharper inner
-        // line over. Pass `level` for the audio pulse and the gaze
-        // angles so contours turn with the face.
-        self.stroke_contours(
+        // Render contour paths as strings of soft radial splats —
+        // identical material to the particle field — so the lines
+        // FEEL part of the face instead of a sharp UI overlay
+        // floating in front of it. Each path is walked segment by
+        // segment at sub-pixel spacing; each step lays down a
+        // gaussian-ish dot using the same `blend_add_premul` the
+        // particle pass uses. Result: the line is granular,
+        // additively-blended into the field, and shares its glow
+        // character.
+        self.splat_contours(
             character,
             breath,
             state.audio_level,
             state.gaze_yaw,
             state.gaze_pitch,
+            sway_x,
+            sway_y,
+            sway_z,
+            shake_x,
+            shake_y,
+            state.materialized,
+            time,
             cx,
             cy,
             sc,
@@ -831,18 +899,34 @@ impl Renderer {
             let y0 = (sy - half).floor() as i32;
             let x1 = (sx + half).ceil() as i32;
             let y1 = (sy + half).ceil() as i32;
+            // Radial falloff — same trick as the face particle pass, so
+            // embers read as glowing motes instead of orange squares.
+            let rad_sq = (half * half).max(0.25);
+            let inv_rad_sq = 1.0 / rad_sq;
             for py in y0..=y1 {
                 if py < 0 || py >= ph as i32 {
                     continue;
                 }
+                let ddy = py as f32 + 0.5 - sy;
+                let ddy_sq = ddy * ddy;
                 for px in x0..=x1 {
                     if px < 0 || px >= pw as i32 {
                         continue;
                     }
+                    let ddx = px as f32 + 0.5 - sx;
+                    let d2 = ddx * ddx + ddy_sq;
+                    if d2 >= rad_sq {
+                        continue;
+                    }
+                    let f = 1.0 - d2 * inv_rad_sq;
+                    let aa = (a as f32 * f * f) as u32;
+                    if aa < 1 {
+                        continue;
+                    }
                     let off = ((py as usize) * pw + (px as usize)) * 4;
-                    let cr_p = (cr * a) / 255;
-                    let cg_p = (cg * a) / 255;
-                    let cb_p = (cb * a) / 255;
+                    let cr_p = (cr * aa) / 255;
+                    let cg_p = (cg * aa) / 255;
+                    let cb_p = (cb * aa) / 255;
                     data[off] = (data[off] as u32 + cr_p).min(255) as u8;
                     data[off + 1] = (data[off + 1] as u32 + cg_p).min(255) as u8;
                     data[off + 2] = (data[off + 2] as u32 + cb_p).min(255) as u8;
@@ -991,6 +1075,224 @@ impl Renderer {
 
     /// Draw all contour polylines using tiny_skia's stroker. Two-pass:
     /// a fat outer-glow stroke first, a crisp inner line on top.
+    /// Render contour paths as overlapping soft radial splats — the
+    /// SAME splat machinery the particle pass uses. This is what makes
+    /// the lines feel attached to the face: line and field share
+    /// material (granular, additively-blended, gaussian-falloff dots)
+    /// instead of the line being a sharp stroked vector floating in
+    /// front of a fuzzy field.
+    ///
+    /// For each path we walk every segment in screen-space and lay
+    /// down a string of splats spaced ~half a splat radius apart, so
+    /// adjacent dots overlap and read as a continuous line. Two
+    /// passes: a fat dim glow underneath, a crisp inner string on top
+    /// — same outer/inner stroke logic the old `stroke_contours`
+    /// used, but using particle splats so the result composites
+    /// additively into the field.
+    fn splat_contours(
+        &mut self,
+        character: &Character,
+        breath: f32,
+        audio: f32,
+        gaze_yaw: f32,
+        gaze_pitch: f32,
+        sway_x: f32,
+        sway_y: f32,
+        sway_z: f32,
+        shake_x: f32,
+        shake_y: f32,
+        materialized: f32,
+        time: f32,
+        cx: f32,
+        cy: f32,
+        sc: f32,
+        pixel_scale: f32,
+    ) {
+        let cb: ContourBaseline = character.contour_baseline;
+        let breath_factor = 1.0 + (breath - 0.5) * cb.breath_depth;
+        let audio_factor = 1.0 + audio * 0.8;
+        let mat = materialized.clamp(0.0, 1.0);
+        if mat <= 0.001 {
+            return;
+        }
+        let alpha_boost = 1.0 + audio * 0.4;
+
+        let inner_radius = cb.inner_width * 0.55 * breath_factor * audio_factor * pixel_scale;
+        let outer_radius = cb.outer_width * 0.55 * breath_factor * audio_factor * pixel_scale;
+        let inner_alpha_f = (cb.inner_alpha * alpha_boost * mat).min(1.0);
+        // Outer glow is the wide pass — make it dimmer so two passes
+        // composite as glow-under, crisp-over, exactly like the old
+        // stroke version.
+        let outer_alpha_f = (cb.outer_alpha * alpha_boost * mat * 0.45).min(1.0);
+
+        let cr = character.contour_color[0];
+        let cg = character.contour_color[1];
+        let cbb = character.contour_color[2];
+
+        let yaw_sin = gaze_yaw.sin();
+        let yaw_cos = gaze_yaw.cos();
+        let pitch_sin = gaze_pitch.sin();
+        let pitch_cos = gaze_pitch.cos();
+
+        let pw = self.settings.width as i32;
+        let ph = self.settings.height as i32;
+        let data = self.pixmap.data_mut();
+
+        let project = |fx: f32, fy: f32| -> (f32, f32) {
+            // Mirror the particle pass's transform exactly: sway →
+            // yaw/pitch → perspective → shake.
+            let mut x = fx + sway_x;
+            let mut y = fy + sway_y;
+            let mut z = sway_z;
+            let rx = x * yaw_cos + z * yaw_sin;
+            let rz = -x * yaw_sin + z * yaw_cos;
+            x = rx;
+            z = rz;
+            let ry = y * pitch_cos - z * pitch_sin;
+            let rz2 = y * pitch_sin + z * pitch_cos;
+            y = ry;
+            z = rz2;
+            let depth = 1.0 / (2.5 + z);
+            let sx = cx + x * sc * depth + shake_x;
+            let sy = cy - y * sc * depth + shake_y;
+            (sx, sy)
+        };
+
+        // Splat one soft radial dot. Same gaussian-falloff blend as
+        // the field particle pass — quadratic falloff over a circle.
+        let splat = |data: &mut [u8], sx: f32, sy: f32, size: f32, alpha_f: f32| {
+            if alpha_f <= 0.002 {
+                return;
+            }
+            let half = size * 0.5;
+            let x0 = ((sx - half).floor() as i32).max(0);
+            let y0 = ((sy - half).floor() as i32).max(0);
+            let x1 = ((sx + half).ceil() as i32).min(pw - 1);
+            let y1 = ((sy + half).ceil() as i32).min(ph - 1);
+            let rad_sq = (half * half).max(0.25);
+            let inv_rad_sq = 1.0 / rad_sq;
+            let alpha_base = alpha_f * 255.0;
+            let pw_us = pw as usize;
+            for py in y0..=y1 {
+                let ddy = py as f32 + 0.5 - sy;
+                let ddy_sq = ddy * ddy;
+                let row_off = (py as usize) * pw_us;
+                for px in x0..=x1 {
+                    let ddx = px as f32 + 0.5 - sx;
+                    let d2 = ddx * ddx + ddy_sq;
+                    if d2 >= rad_sq {
+                        continue;
+                    }
+                    let f = 1.0 - d2 * inv_rad_sq;
+                    let aa = (alpha_base * f * f) as u8;
+                    if aa < 1 {
+                        continue;
+                    }
+                    let off = (row_off + px as usize) * 4;
+                    blend_add_premul(&mut data[off..off + 4], cr, cg, cbb, aa);
+                }
+            }
+        };
+
+        // Per-vertex wobble — three-frequency, matching the per-
+        // particle drift's temporal structure (slow swim + medium
+        // pulse + fast crackle). Without all three the line moves but
+        // SO slowly that at 60fps it reads as still while the field
+        // (which has all three bands) is visibly alive.
+        // Per-path phase desynchronises mouth, eyes, horns.
+        let nt = time * 1.4;
+        let mat_amp = mat; // gate everything by materialization
+
+        // Walk each path; for each pair of consecutive points, project
+        // to screen, then walk pixel-spaced steps along the screen
+        // segment laying down splats. Two passes — outer-glow first,
+        // then inner crisp — so the glow sits under the line.
+        for (path_idx, path) in character.contour_paths.iter().enumerate() {
+            if path.len() < 2 {
+                continue;
+            }
+            let path_phase = path_idx as f32 * 1.7;
+
+            // Pre-project each vertex with its own wobble offset.
+            // Three frequency bands: a slow per-vertex swim (the
+            // line breathes), a medium pulse (the line "drifts"
+            // with the head), and a fast crackle (high-frequency
+            // shimmer matching the field's per-particle crackle).
+            // Combined energy ≈ per-particle drift but distributed
+            // along arc so the line stays a coherent curve.
+            let projected: Vec<(f32, f32)> = path
+                .iter()
+                .enumerate()
+                .map(|(j, pt)| {
+                    let arc = j as f32;
+                    // Slow swim — varies along arc, slow over time.
+                    let slow_x = (arc * 0.55 + nt + path_phase).sin()
+                        * (arc * 0.23 + nt * 0.7).cos()
+                        * 0.05;
+                    let slow_y = (arc * 0.47 + nt * 1.1 + path_phase).cos()
+                        * (arc * 0.31 + nt * 0.5).sin()
+                        * 0.04;
+                    // Medium pulse — whole-path drift, ~3 Hz so each
+                    // contour visibly wanders frame-to-frame.
+                    let med_x = (time * 3.0 + path_phase).sin() * 0.04;
+                    let med_y = (time * 2.6 + path_phase * 1.3).cos() * 0.035;
+                    // Fast crackle — high-frequency arc-length jitter,
+                    // ~7 Hz. This is the "alive" energy at 60fps.
+                    let fast_x = (arc * 1.3 + time * 7.0 + path_phase).sin() * 0.02;
+                    let fast_y = (arc * 1.1 + time * 6.4 + path_phase).cos() * 0.018;
+                    let wob_x = (slow_x + med_x + fast_x) * mat_amp;
+                    let wob_y = (slow_y + med_y + fast_y) * mat_amp;
+                    project(pt[0] + wob_x, pt[1] + wob_y)
+                })
+                .collect();
+
+            // Spacing — about half a splat radius keeps adjacent dots
+            // overlapping ~50% and the result reads as a continuous
+            // line, not a dotted string.
+            let outer_step = (outer_radius * 0.5).max(0.8);
+            let inner_step = (inner_radius * 0.5).max(0.6);
+
+            for win in projected.windows(2) {
+                let (a_sx, a_sy) = win[0];
+                let (b_sx, b_sy) = win[1];
+                let dx = b_sx - a_sx;
+                let dy = b_sy - a_sy;
+                let seg_len = (dx * dx + dy * dy).sqrt();
+                if seg_len < 0.5 {
+                    continue;
+                }
+
+                // Outer-glow pass — fat dim splats under.
+                let n_outer = (seg_len / outer_step).ceil() as i32;
+                for k in 0..=n_outer {
+                    let t = k as f32 / n_outer as f32;
+                    let sx = a_sx + dx * t;
+                    let sy = a_sy + dy * t;
+                    splat(data, sx, sy, outer_radius * 2.0, outer_alpha_f);
+                }
+
+                // Inner crisp pass — narrower, brighter splats over.
+                let n_inner = (seg_len / inner_step).ceil() as i32;
+                for k in 0..=n_inner {
+                    let t = k as f32 / n_inner as f32;
+                    let sx = a_sx + dx * t;
+                    let sy = a_sy + dy * t;
+                    splat(data, sx, sy, inner_radius * 2.0, inner_alpha_f);
+                }
+            }
+        }
+
+        // Unused for the splat path — quiet warning.
+        let _ = character.render_config.band_glow;
+    }
+
+    /// Vector-stroke contour renderer — kept around for reference but
+    /// not currently called (the renderer now uses [`splat_contours`]
+    /// instead, which produces a particle-string line that composites
+    /// into the field). Leaving the code in place because the old
+    /// approach is still the fastest path for high-resolution offline
+    /// renders where the line should look like a clean ink stroke.
+    #[allow(dead_code)]
     fn stroke_contours(
         &mut self,
         character: &Character,
@@ -998,6 +1300,13 @@ impl Renderer {
         audio: f32,
         gaze_yaw: f32,
         gaze_pitch: f32,
+        sway_x: f32,
+        sway_y: f32,
+        sway_z: f32,
+        shake_x: f32,
+        shake_y: f32,
+        materialized: f32,
+        time: f32,
         cx: f32,
         cy: f32,
         sc: f32,
@@ -1013,14 +1322,32 @@ impl Renderer {
         let outer_w = cb.outer_width * breath_factor * audio_factor * pixel_scale;
         let inner_w = cb.inner_width * breath_factor * audio_factor * pixel_scale;
         // Boost alpha with audio too — the contour gets visibly hotter
-        // (not just thicker) under speech.
+        // (not just thicker) under speech. Gate everything by
+        // `materialized` so contours fade in with the particle field
+        // instead of popping in fully visible while the face is still
+        // scattered — the source of the "lines detached from face"
+        // read during the materialize-in.
         let alpha_boost = 1.0 + audio * 0.4;
-        let outer_a = ((cb.outer_alpha * alpha_boost).min(1.0) * 255.0) as u8;
-        let inner_a = ((cb.inner_alpha * alpha_boost).min(1.0) * 255.0) as u8;
+        let mat = materialized.clamp(0.0, 1.0);
+        let outer_a = ((cb.outer_alpha * alpha_boost * mat).min(1.0) * 255.0) as u8;
+        let inner_a = ((cb.inner_alpha * alpha_boost * mat).min(1.0) * 255.0) as u8;
 
         let band_glow = character.render_config.band_glow;
+        // Per-point shimmer — a smooth traveling-wave wobble along the
+        // arc, in the same character as the per-particle drift the field
+        // does. Without this the line reads as a rigid foreground UI
+        // element floating over a wobbling jelly face. With it, the
+        // contour "breathes" with the field and feels glued to it.
+        // Amplitude is much lower than per-particle drift (~0.025 vs
+        // 0.13) because the contour is a continuous curve — same energy,
+        // distributed along arc length, would look squirmy. The
+        // materialization gate (`mat`) scales it down with the fade-in
+        // so the lines don't whip around while the face is still
+        // scattering in.
+        let nt = time * 0.9;
+        let wobble_amp = 0.025 * mat;
 
-        for path in &character.contour_paths {
+        for (path_idx, path) in character.contour_paths.iter().enumerate() {
             if path.len() < 2 {
                 continue;
             }
@@ -1033,10 +1360,29 @@ impl Renderer {
             let pitch_sin = gaze_pitch.sin();
             let pitch_cos = gaze_pitch.cos();
             let mut pb = PathBuilder::new();
+            // Per-path phase offset so different contour paths shimmer
+            // out of sync — eye line, mouth line, horn line each have
+            // their own wave instead of all moving in lockstep.
+            let path_phase = path_idx as f32 * 1.7;
             for (j, p) in path.iter().enumerate() {
-                let mut x = p[0];
-                let mut y = p[1];
-                let mut z = 0.0_f32;
+                // Arc-length wobble — a low-frequency wave traveling
+                // along the contour. Neighbour points share most of
+                // their wave value (smooth) but the wave slowly
+                // propagates over time, so the line looks alive.
+                let arc = j as f32;
+                let wob_x = (arc * 0.31 + nt + path_phase).sin()
+                    * (arc * 0.13 + nt * 0.7).cos()
+                    * wobble_amp;
+                let wob_y = (arc * 0.27 + nt * 1.1 + path_phase).cos()
+                    * (arc * 0.17 + nt * 0.5).sin()
+                    * wobble_amp * 0.85;
+
+                // Apply the same global sway the particle pass applies
+                // BEFORE yaw/pitch — keeps the contour in lockstep with
+                // the face as the whole head Lissajous-drifts.
+                let mut x = p[0] + sway_x + wob_x;
+                let mut y = p[1] + sway_y + wob_y;
+                let mut z = sway_z;
                 // Yaw around y.
                 let rx = x * yaw_cos + z * yaw_sin;
                 let rz = -x * yaw_sin + z * yaw_cos;
@@ -1048,8 +1394,11 @@ impl Renderer {
                 y = ry;
                 z = rz2;
                 let depth = 1.0 / (2.5 + z);
-                let sx = cx + x * sc * depth;
-                let sy = cy - y * sc * depth;
+                // Apply screen-space camera shake AFTER projection —
+                // same as the particle pass — so the audio-onset jolt
+                // shakes the contour with the face.
+                let sx = cx + x * sc * depth + shake_x;
+                let sy = cy - y * sc * depth + shake_y;
                 if j == 0 {
                     pb.move_to(sx, sy);
                 } else {

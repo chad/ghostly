@@ -10,10 +10,10 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use ghostly::{characters, apply_emotion, Emotion, FaceState, RenderSettings, Renderer};
+use ghostly::{characters, apply_emotion, CharacterPack, Emotion, FaceState, RenderSettings, Renderer};
 use ghostly::audio::{profile, VoiceChain};
 
-const USAGE: &str = "Usage: ghostly <character> [--output PATH] [--frames N] [--fps N] [--particles N] [--size WxH] [--emotion NAME[:0.0-1.0]]\n       ghostly voice <character|emotion> --input PATH --output PATH\n       ghostly --list\n\nCharacters: oblivion, narrator, utopia, eliza\nEmotions:   joy, triumph, curiosity, passion, calm, awe, warmth, concern";
+const USAGE: &str = "Usage: ghostly <character> [--output PATH] [--frames N] [--fps N] [--particles N] [--size WxH] [--emotion NAME[:0.0-1.0]]\n       ghostly --pack PATH.json [--output PATH] [--frames N] ...   # render a custom character pack\n       ghostly voice <character|emotion> --input PATH --output PATH\n       ghostly voice --pack PATH.json --input PATH --output PATH\n       ghostly export <character> [--output PATH.json]             # dump a built-in as an editable pack\n       ghostly --list\n\nCharacters: oblivion, narrator, utopia, eliza\nEmotions:   joy, triumph, curiosity, passion, calm, awe, warmth, concern";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -35,8 +35,15 @@ fn main() -> ExitCode {
         return run_voice(&args[1..]);
     }
 
+    // ── `export` subcommand — dump a built-in character as an editable
+    //    JSON pack (the starting point for forking your own).
+    if args[0] == "export" {
+        return run_export(&args[1..]);
+    }
+
     // First positional arg is the character name; remaining are flags.
     let mut name: Option<String> = None;
+    let mut pack_path: Option<PathBuf> = None;
     let mut output: PathBuf = PathBuf::from("out.png");
     let mut frames: usize = 1;
     let mut fps: u32 = 30;
@@ -56,6 +63,10 @@ fn main() -> ExitCode {
         match arg.as_str() {
             "--output" => {
                 output = PathBuf::from(args.get(i + 1).cloned().unwrap_or_default());
+                i += 2;
+            }
+            "--pack" => {
+                pack_path = args.get(i + 1).map(PathBuf::from);
                 i += 2;
             }
             "--frames" => {
@@ -113,13 +124,34 @@ fn main() -> ExitCode {
         }
     }
 
-    let Some(name) = name else {
-        eprintln!("{USAGE}");
-        return ExitCode::from(2);
-    };
-    let Some(character) = characters::by_name(&name) else {
-        eprintln!("unknown character: {name:?}\n{USAGE}");
-        return ExitCode::from(2);
+    // Resolve the character from either a custom pack (`--pack`) or a
+    // built-in name. A pack supplies its own name, so the positional
+    // argument is optional when `--pack` is given.
+    let character = if let Some(path) = &pack_path {
+        let pack = match CharacterPack::from_file(path) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("could not load pack {}: {e}", path.display());
+                return ExitCode::FAILURE;
+            }
+        };
+        match pack.to_character() {
+            Some(c) => c,
+            None => {
+                eprintln!("pack {:?} has unknown base archetype {:?}", path.display(), pack.base);
+                return ExitCode::from(2);
+            }
+        }
+    } else {
+        let Some(name) = name else {
+            eprintln!("{USAGE}");
+            return ExitCode::from(2);
+        };
+        let Some(character) = characters::by_name(&name) else {
+            eprintln!("unknown character: {name:?}\n{USAGE}");
+            return ExitCode::from(2);
+        };
+        character
     };
     let character = match emotion {
         Some((e, i)) => apply_emotion(&character, e, i),
@@ -185,17 +217,28 @@ fn main() -> ExitCode {
 /// for offline auditioning; the live-stream path uses
 /// [`ghostly::audio::VoiceChain`] directly.
 fn run_voice(args: &[String]) -> ExitCode {
-    let usage = "Usage: ghostly voice <character|emotion> --input PATH --output PATH";
+    let usage = "Usage: ghostly voice <character|emotion> --input PATH --output PATH\n       ghostly voice --pack PATH.json --input PATH --output PATH";
     if args.is_empty() {
         eprintln!("{usage}");
         return ExitCode::from(2);
     }
-    let name = args[0].clone();
+    let mut name: Option<String> = None;
+    let mut pack_path: Option<PathBuf> = None;
     let mut input: Option<PathBuf> = None;
     let mut output: Option<PathBuf> = None;
-    let mut i = 1;
+    let mut i = 0;
     while i < args.len() {
-        match args[i].as_str() {
+        let arg = &args[i];
+        if !arg.starts_with("--") && name.is_none() {
+            name = Some(arg.clone());
+            i += 1;
+            continue;
+        }
+        match arg.as_str() {
+            "--pack" => {
+                pack_path = args.get(i + 1).map(PathBuf::from);
+                i += 2;
+            }
             "--input" => {
                 input = args.get(i + 1).map(PathBuf::from);
                 i += 2;
@@ -219,12 +262,27 @@ fn run_voice(args: &[String]) -> ExitCode {
         return ExitCode::from(2);
     };
 
-    // Resolve name → profile. Try character-default first; fall back
-    // to direct emotion lookup. This way `ghostly voice oblivion` and
-    // `ghostly voice passion` both produce passion-chained audio.
-    let prof = match name.as_str() {
-        "narrator" | "utopia" | "oblivion" | "eliza" => profile::for_character(&name),
-        _ => profile::for_emotion(&name),
+    // Resolve the voice profile from a custom pack (`--pack`) or a name.
+    // For a name: try character-default first, then direct emotion
+    // lookup — so `ghostly voice oblivion` and `ghostly voice passion`
+    // both produce passion-chained audio.
+    let prof = if let Some(path) = &pack_path {
+        match CharacterPack::from_file(path) {
+            Ok(p) => p.voice_profile(),
+            Err(e) => {
+                eprintln!("could not load pack {}: {e}", path.display());
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        let Some(name) = name.as_deref() else {
+            eprintln!("character/emotion name or --pack required\n{usage}");
+            return ExitCode::from(2);
+        };
+        match name {
+            "narrator" | "utopia" | "oblivion" | "eliza" => profile::for_character(name),
+            _ => profile::for_emotion(name),
+        }
     };
 
     // Read WAV — convert to mono f32 regardless of source format.
@@ -304,5 +362,54 @@ fn run_voice(args: &[String]) -> ExitCode {
         spec.sample_rate,
         prof.label
     );
+    ExitCode::SUCCESS
+}
+
+/// `ghostly export <character> [--output PATH.json]` — dump a built-in
+/// character as an editable JSON pack. This is the starting point for
+/// forking: export, tweak geometry/palette/effects/voice, then
+/// `ghostly render --pack PATH.json`. Writes to stdout if `--output`
+/// is omitted.
+fn run_export(args: &[String]) -> ExitCode {
+    let usage = "Usage: ghostly export <character> [--output PATH.json]";
+    let Some(name) = args.first() else {
+        eprintln!("{usage}\nCharacters: {}", characters::ALL.join(", "));
+        return ExitCode::from(2);
+    };
+    let mut output: Option<PathBuf> = None;
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--output" => {
+                output = args.get(i + 1).map(PathBuf::from);
+                i += 2;
+            }
+            other => {
+                eprintln!("unknown arg: {other}\n{usage}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let Some(pack) = CharacterPack::from_character(name) else {
+        eprintln!("unknown character: {name:?}\nCharacters: {}", characters::ALL.join(", "));
+        return ExitCode::from(2);
+    };
+    let json = match pack.to_json_string() {
+        Ok(j) => j,
+        Err(e) => {
+            eprintln!("could not serialize pack: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match output {
+        Some(path) => {
+            if let Err(e) = std::fs::write(&path, json) {
+                eprintln!("could not write {}: {e}", path.display());
+                return ExitCode::FAILURE;
+            }
+            println!("wrote {}", path.display());
+        }
+        None => println!("{json}"),
+    }
     ExitCode::SUCCESS
 }

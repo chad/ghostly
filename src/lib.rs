@@ -33,6 +33,7 @@ pub mod audio;
 pub mod character;
 pub mod characters;
 pub mod face;
+pub mod pack;
 pub mod render;
 pub mod sentiment;
 
@@ -41,5 +42,6 @@ pub use character::{
     Palette, RenderConfig, Transition, VoronoiMesh,
 };
 pub use face::{generate_face, Particle};
+pub use pack::CharacterPack;
 pub use render::{FaceState, RenderSettings, Renderer};
 pub use sentiment::{apply_emotion, Emotion};

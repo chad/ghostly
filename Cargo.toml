@@ -25,6 +25,12 @@ fundsp = "0.20"
 # --input in.wav --output out.wav`). The live-stream API takes raw
 # f32 slices and never touches `hound`.
 hound = "3"
+# Character packs — serializable, forkable character definitions
+# (geometry + palette + render effects + voice DSP). JSON, not TOML:
+# `RenderConfig` interleaves scalars and sub-tables, which TOML's
+# "values before tables" rule rejects; JSON has no such constraint.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [[bin]]
 name = "ghostly"

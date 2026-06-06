@@ -18,13 +18,22 @@
 //! The avatar JS object had ad-hoc fields per character; here every
 //! field exists for every character (some Default) so the renderer
 //! never special-cases by name.
+//!
+//! The plain-data structs ([`Geometry`], [`Palette`], [`RenderConfig`],
+//! …) derive `Serialize`/`Deserialize` so they can be carried in a
+//! [`crate::pack::CharacterPack`] — the forkable, on-disk character
+//! definition. [`Character`] and [`Transition`] themselves are *not*
+//! serializable (the displace closure can't be), which is why a pack
+//! inherits its structural bits from a named built-in archetype.
+
+use serde::{Deserialize, Serialize};
 
 /// Procedural face proportions. Defaults reproduce the avatar's
 /// "neutral" geometry preset. Set fields that differ per character and
 /// leave the rest at the avatar defaults.
 ///
 /// Mirrors `GEOMETRY_PRESETS` in `face-gen.js`.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct Geometry {
     pub head_width: f32,
     pub head_height: f32,
@@ -75,7 +84,7 @@ impl Default for Geometry {
 
 /// Five-channel colour palette. Mirrors the JS `PALETTES` entries in
 /// `face-gen.js`. RGB components are `0.0..=1.0`.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct Palette {
     pub base: [f32; 3],
     pub deep: [f32; 3],
@@ -145,7 +154,7 @@ impl Default for Transition {
 
 /// Stroke + breathing parameters for the contour overlay when the face
 /// is silent. Mirrors `contourBaseline` in the JS spec.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct ContourBaseline {
     pub outer_width: f32,
     pub inner_width: f32,
@@ -176,7 +185,7 @@ impl Default for ContourBaseline {
 /// subset it can express cheaply (rim glow, voronoi mesh, nebula
 /// cloud, accent-particle ring, vignette, audio-reactive colour
 /// shifts, audio-reactive contour pulse).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RenderConfig {
     pub fresnel_power: f32,
     pub fresnel_intensity: f32,
@@ -232,7 +241,7 @@ impl Default for RenderConfig {
 /// A dim coloured radial gradient painted behind the face. Mirrors
 /// `nebulaCloud` in the JS spec — for Utopia it bathes the orb in a
 /// warm golden glow.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct NebulaCloud {
     pub color: [u8; 3],
     /// `0..1` strength at the centre. Faints to zero at the corners.
@@ -242,7 +251,7 @@ pub struct NebulaCloud {
 /// Ring of independently-orbiting accent particles. Mirrors
 /// `accentParticles` in the JS spec. Used for Utopia's lavender edge
 /// motes.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct AccentParticles {
     pub count: u32,
     pub color: [u8; 3],
@@ -255,7 +264,7 @@ pub struct AccentParticles {
 /// Rising-ember particle system — particles spawn at random points on
 /// the lower face, drift upward with slight horizontal wander, and
 /// fade out as they age. Oblivion's signature flavour: she's *burning*.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct EmberConfig {
     /// New embers per second.
     pub spawn_rate: f32,
@@ -273,7 +282,7 @@ pub struct EmberConfig {
 
 /// Faint cracked-glass wireframe overlay (`voronoiMesh` in the JS
 /// spec). Oblivion uses a red-tinted mesh; Utopia would use gold.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct VoronoiMesh {
     pub color: [u8; 3],
     pub alpha: f32,

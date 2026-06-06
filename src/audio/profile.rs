@@ -8,12 +8,20 @@
 //! file — the avatar is the source of truth; tune there, then port
 //! the diff back.
 
+use serde::{Deserialize, Serialize};
+
 /// One frozen state of the voice chain. Mirrors the JS profile object
 /// 1:1; field order matches the `applyVoiceProfile()` calls in
 /// presenter.html so the port is auditable side-by-side.
-#[derive(Clone, Copy, Debug)]
+///
+/// Derives `Serialize`/`Deserialize` so the *entire* voice identity can
+/// be carried in a [`crate::pack::CharacterPack`] and forked as data.
+/// The `label` is a `&'static str` (can't be deserialized into), so it's
+/// skipped on the wire and defaults to `"custom"` when loaded from a pack.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct VoiceProfile {
     /// Human-friendly tag — shown in the avatar's emotion overlay.
+    #[serde(skip, default = "default_voice_label")]
     pub label: &'static str,
     // ── Spectral shaping ─────────────────────────────────────────
     pub formant_shift: f32,
@@ -61,6 +69,12 @@ impl VoiceProfile {
     /// safety default and as the "off" target the JS code uses when
     /// it transitions away from an emotion.
     pub const NEUTRAL: VoiceProfile = CALM;
+}
+
+/// Label restored for voice profiles deserialized from a pack (the
+/// real `&'static str` label isn't carried on the wire).
+fn default_voice_label() -> &'static str {
+    "custom"
 }
 
 /// ✧ Luminous / Fae — UTOPIA. Lifted formants, slight detune up,

@@ -1,12 +1,17 @@
-//! Voice-effect profiles — ported verbatim from
+//! Voice-effect profiles — originally ported verbatim from
 //! `~/src/avatar/static/presenter.html` (VOICE_PROFILES, lines 466-555)
 //! and the character→emotion mapping (line 967):
 //!
 //!   `narrator → calm, utopia → joy, oblivion → passion`
 //!
-//! Every numeric value here is the JS literal. Don't tune in this
-//! file — the avatar is the source of truth; tune there, then port
-//! the diff back.
+//! DIVERGED from the avatar (2026-06-10): the wet mixes were tuned for
+//! headphone theater; in live freeq calls they buried the words. After
+//! repeated "I can't understand her" reports the time-based wets
+//! (delay/shimmer/chorus), freq-shift beating, and pitch extremes were
+//! cut roughly in half across every profile — A/B'd live on olive
+//! (CURIOSITY) first, then the same ratios applied to the rest. The
+//! character color is still there; the consonants survive now. If you
+//! re-port from the avatar, re-apply this haircut.
 
 use serde::{Deserialize, Serialize};
 
@@ -101,56 +106,58 @@ pub const JOY: VoiceProfile = VoiceProfile {
     glitch_prob: 0.3,
     glitch_mix: 0.0,
     freq_shift_hz: 4.0,
-    freq_shift_mix: 0.08,
+    freq_shift_mix: 0.03,
     comb_freq: 300.0,
     comb_feedback: 0.3,
     comb_mix: 0.0,
     crush_bits: 16.0,
     crush_mix: 0.0,
-    delay_mix: 0.06,
+    delay_mix: 0.04,
     delay_feedback: 0.12,
-    shimmer_mix: 0.15,
+    shimmer_mix: 0.08,
     shimmer_decay: 1.5,
-    shimmer_amount: 0.3,
-    chorus_mix: 0.2,
+    shimmer_amount: 0.2,
+    chorus_mix: 0.1,
     chorus_rate: 1.8,
-    // ~+3 dB to match the dry reference — JOY has full formant + full
-    // pitch + shimmer + chorus, all of which average the signal down.
-    output_gain: 1.4,
+    // Drier sparkle loses less level than the original full wash.
+    output_gain: 1.2,
 };
 
-/// ◌ Spectral / Diffuse — distant, dreamy.
+/// ◌ Spectral / Diffuse — distant, dreamy. These are olive's live-tuned
+/// numbers (the "ghostly-olive.json" A/B on 2026-06-09): barely-lowered
+/// pitch, a whisper of shimmer/chorus, no comb. Reads as the same
+/// spectral character but every word lands.
 pub const CURIOSITY: VoiceProfile = VoiceProfile {
     label: "curiosity",
     formant_shift: 0.0,
     formant_mix: 1.0,
-    pitch_semitones: -2.0,
-    pitch_cents: -20.0,
+    pitch_semitones: -0.5,
+    pitch_cents: -8.0,
     pitch_mix: 1.0,
     eq_low: 1.0,
-    eq_mid: 0.0,
-    eq_high: 0.0,
+    eq_mid: 1.0,
+    eq_high: 1.0,
     glitch_active: false,
     glitch_rate: 4.0,
     glitch_size: 0.1,
     glitch_prob: 0.2,
     glitch_mix: 0.0,
     freq_shift_hz: 6.0,
-    freq_shift_mix: 0.1,
+    freq_shift_mix: 0.03,
     comb_freq: 250.0,
     comb_feedback: 0.35,
-    comb_mix: 0.05,
+    comb_mix: 0.0,
     crush_bits: 16.0,
     crush_mix: 0.0,
-    delay_mix: 0.2,
-    delay_feedback: 0.35,
-    shimmer_mix: 0.3,
-    shimmer_decay: 5.0,
-    shimmer_amount: 0.45,
-    chorus_mix: 0.25,
+    delay_mix: 0.05,
+    delay_feedback: 0.15,
+    shimmer_mix: 0.08,
+    shimmer_decay: 1.5,
+    shimmer_amount: 0.3,
+    chorus_mix: 0.08,
     chorus_rate: 0.7,
-    // ~+3 dB to compensate full formant + full pitch + heavy shimmer.
-    output_gain: 1.4,
+    // Much drier chain loses less level — modest makeup only.
+    output_gain: 1.15,
 };
 
 /// ▲ Monolith / Force — OBLIVION. Dark, lowered, mechanical edge.
@@ -161,8 +168,8 @@ pub const CURIOSITY: VoiceProfile = VoiceProfile {
 /// without crossing into novelty.
 pub const PASSION: VoiceProfile = VoiceProfile {
     label: "passion",
-    formant_shift: -2.5,
-    formant_mix: 1.0,
+    formant_shift: -1.8,
+    formant_mix: 0.8,
     pitch_semitones: -1.0,
     pitch_cents: 0.0,
     pitch_mix: 1.0,
@@ -175,26 +182,22 @@ pub const PASSION: VoiceProfile = VoiceProfile {
     glitch_prob: 0.2,
     glitch_mix: 0.0,
     freq_shift_hz: 8.0,
-    freq_shift_mix: 0.06,
+    freq_shift_mix: 0.02,
     comb_freq: 150.0,
     comb_feedback: 0.25,
-    comb_mix: 0.04,
+    comb_mix: 0.02,
     crush_bits: 14.0,
-    crush_mix: 0.02,
-    delay_mix: 0.08,
+    crush_mix: 0.01,
+    delay_mix: 0.05,
     delay_feedback: 0.2,
-    shimmer_mix: 0.1,
+    shimmer_mix: 0.05,
     shimmer_decay: 2.0,
     shimmer_amount: 0.15,
-    chorus_mix: 0.1,
+    chorus_mix: 0.05,
     chorus_rate: 0.4,
-    // ~+7 dB. The heaviest wet chain — full formant shift, full pitch
-    // shift, comb + bitcrush + freqshift active, delay + shimmer +
-    // chorus. The user A/B-tested live and reported Oblivion was
-    // noticeably quieter than Narrator's dry path; this brings him
-    // back into the same loudness ballpark without driving comp_out
-    // into clipping.
-    output_gain: 2.2,
+    // Still the wettest chain, but at half the old mixes it loses far
+    // less level than the original (which needed +7 dB makeup).
+    output_gain: 1.6,
 };
 
 /// ○ Liminal / Still — NARRATOR. Near-identity, gentle sweetening.
@@ -220,12 +223,12 @@ pub const CALM: VoiceProfile = VoiceProfile {
     comb_mix: 0.0,
     crush_bits: 16.0,
     crush_mix: 0.0,
-    delay_mix: 0.04,
+    delay_mix: 0.03,
     delay_feedback: 0.1,
-    shimmer_mix: 0.08,
+    shimmer_mix: 0.05,
     shimmer_decay: 1.2,
     shimmer_amount: 0.15,
-    chorus_mix: 0.1,
+    chorus_mix: 0.06,
     chorus_rate: 0.4,
     // Baseline — CALM bypasses formant + pitch + most destruction
     // nodes (mix=0), so the chain is near-identity and needs no
@@ -250,28 +253,28 @@ pub const AWE: VoiceProfile = VoiceProfile {
     glitch_prob: 0.25,
     glitch_mix: 0.0,
     freq_shift_hz: 5.0,
-    freq_shift_mix: 0.03,
+    freq_shift_mix: 0.02,
     comb_freq: 160.0,
     comb_feedback: 0.15,
     comb_mix: 0.02,
     crush_bits: 16.0,
     crush_mix: 0.0,
-    delay_mix: 0.22,
-    delay_feedback: 0.35,
-    shimmer_mix: 0.35,
-    shimmer_decay: 6.0,
-    shimmer_amount: 0.55,
-    chorus_mix: 0.25,
+    delay_mix: 0.1,
+    delay_feedback: 0.2,
+    shimmer_mix: 0.12,
+    shimmer_decay: 2.5,
+    shimmer_amount: 0.3,
+    chorus_mix: 0.1,
     chorus_rate: 0.3,
-    output_gain: 1.6,
+    output_gain: 1.3,
 };
 
 /// ♡ Hearthside / Close.
 pub const WARMTH: VoiceProfile = VoiceProfile {
     label: "warmth",
-    formant_shift: -2.0,
+    formant_shift: -1.5,
     formant_mix: 1.0,
-    pitch_semitones: -2.0,
+    pitch_semitones: -1.0,
     pitch_cents: 0.0,
     pitch_mix: 1.0,
     eq_low: 2.0,
@@ -289,20 +292,20 @@ pub const WARMTH: VoiceProfile = VoiceProfile {
     comb_mix: 0.0,
     crush_bits: 16.0,
     crush_mix: 0.0,
-    delay_mix: 0.12,
+    delay_mix: 0.06,
     delay_feedback: 0.2,
-    shimmer_mix: 0.12,
+    shimmer_mix: 0.06,
     shimmer_decay: 2.5,
     shimmer_amount: 0.2,
-    chorus_mix: 0.15,
+    chorus_mix: 0.08,
     chorus_rate: 0.5,
-    output_gain: 1.5,
+    output_gain: 1.25,
 };
 
 /// ★ Stadium / Presence.
 pub const TRIUMPH: VoiceProfile = VoiceProfile {
     label: "triumph",
-    formant_shift: -2.0,
+    formant_shift: -1.5,
     formant_mix: 1.0,
     pitch_semitones: 0.0,
     pitch_cents: 0.0,
@@ -322,23 +325,23 @@ pub const TRIUMPH: VoiceProfile = VoiceProfile {
     comb_mix: 0.0,
     crush_bits: 16.0,
     crush_mix: 0.0,
-    delay_mix: 0.06,
+    delay_mix: 0.04,
     delay_feedback: 0.1,
-    shimmer_mix: 0.08,
+    shimmer_mix: 0.05,
     shimmer_decay: 1.5,
     shimmer_amount: 0.15,
-    chorus_mix: 0.08,
+    chorus_mix: 0.05,
     chorus_rate: 0.4,
-    output_gain: 1.4,
+    output_gain: 1.2,
 };
 
 /// ▽ Void / Machine.
 pub const CONCERN: VoiceProfile = VoiceProfile {
     label: "concern",
-    formant_shift: -3.0,
+    formant_shift: -2.0,
     formant_mix: 1.0,
-    pitch_semitones: -2.0,
-    pitch_cents: -10.0,
+    pitch_semitones: -1.0,
+    pitch_cents: -5.0,
     pitch_mix: 1.0,
     eq_low: 2.0,
     eq_mid: 0.0,
@@ -349,20 +352,20 @@ pub const CONCERN: VoiceProfile = VoiceProfile {
     glitch_prob: 0.2,
     glitch_mix: 0.0,
     freq_shift_hz: 5.0,
-    freq_shift_mix: 0.04,
+    freq_shift_mix: 0.02,
     comb_freq: 180.0,
     comb_feedback: 0.2,
-    comb_mix: 0.03,
+    comb_mix: 0.02,
     crush_bits: 14.0,
-    crush_mix: 0.02,
-    delay_mix: 0.12,
+    crush_mix: 0.01,
+    delay_mix: 0.06,
     delay_feedback: 0.2,
-    shimmer_mix: 0.1,
+    shimmer_mix: 0.05,
     shimmer_decay: 2.0,
     shimmer_amount: 0.15,
-    chorus_mix: 0.12,
+    chorus_mix: 0.06,
     chorus_rate: 0.3,
-    output_gain: 2.0,
+    output_gain: 1.5,
 };
 
 /// Look up an emotion profile by JS name. Returns [`CALM`] if the
